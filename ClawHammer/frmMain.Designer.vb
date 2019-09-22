@@ -16,12 +16,12 @@ Partial Class frmMain
 
     'Required by the Windows Form Designer
     Private components As System.ComponentModel.IContainer
-
     'NOTE: The following procedure is required by the Windows Form Designer
     'It can be modified using the Windows Form Designer.  
     'Do not modify it using the code editor.
     <System.Diagnostics.DebuggerStepThrough()>
     Private Sub InitializeComponent()
+        Me.components = New System.ComponentModel.Container()
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(frmMain))
         Me.grpClawHammer = New System.Windows.Forms.GroupBox()
         Me.chkSaveLog = New System.Windows.Forms.CheckBox()
@@ -32,6 +32,7 @@ Partial Class frmMain
         Me.NumThreads = New System.Windows.Forms.NumericUpDown()
         Me.rhtxtlog = New System.Windows.Forms.RichTextBox()
         Me.StStatus = New System.Windows.Forms.StatusStrip()
+        Me.lblcores = New System.Windows.Forms.ToolStripStatusLabel()
         Me.lblProcessorCount = New System.Windows.Forms.ToolStripStatusLabel()
         Me.LblActiveThreads = New System.Windows.Forms.ToolStripStatusLabel()
         Me.cputemp = New System.Windows.Forms.ToolStripStatusLabel()
@@ -42,17 +43,23 @@ Partial Class frmMain
         Me.ExitToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.HelpToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.AboutToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
-        Me.lblcores = New System.Windows.Forms.ToolStripStatusLabel()
+        Me.SplitContainer1 = New System.Windows.Forms.SplitContainer()
+        Me.lstvCoreTemps = New System.Windows.Forms.ListView()
+        Me.clmcore = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
+        Me.clmCoreTemp = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
+        Me.imgcpu = New System.Windows.Forms.ImageList(Me.components)
         Me.grpClawHammer.SuspendLayout()
         CType(Me.NumThreads, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.StStatus.SuspendLayout()
         Me.clawMenu.SuspendLayout()
+        CType(Me.SplitContainer1, System.ComponentModel.ISupportInitialize).BeginInit()
+        Me.SplitContainer1.Panel1.SuspendLayout()
+        Me.SplitContainer1.Panel2.SuspendLayout()
+        Me.SplitContainer1.SuspendLayout()
         Me.SuspendLayout()
         '
         'grpClawHammer
         '
-        Me.grpClawHammer.Anchor = CType(((System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Left) _
-            Or System.Windows.Forms.AnchorStyles.Right), System.Windows.Forms.AnchorStyles)
         Me.grpClawHammer.Controls.Add(Me.chkSaveLog)
         Me.grpClawHammer.Controls.Add(Me.btnStart)
         Me.grpClawHammer.Controls.Add(Me.lblpriority)
@@ -130,16 +137,15 @@ Partial Class frmMain
         '
         'rhtxtlog
         '
-        Me.rhtxtlog.Anchor = CType((((System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Bottom) _
-            Or System.Windows.Forms.AnchorStyles.Left) _
-            Or System.Windows.Forms.AnchorStyles.Right), System.Windows.Forms.AnchorStyles)
         Me.rhtxtlog.BackColor = System.Drawing.Color.White
+        Me.rhtxtlog.BorderStyle = System.Windows.Forms.BorderStyle.None
+        Me.rhtxtlog.Dock = System.Windows.Forms.DockStyle.Fill
         Me.rhtxtlog.Font = New System.Drawing.Font("Consolas", 9.75!, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, CType(0, Byte))
         Me.rhtxtlog.ForeColor = System.Drawing.Color.Black
-        Me.rhtxtlog.Location = New System.Drawing.Point(5, 112)
+        Me.rhtxtlog.Location = New System.Drawing.Point(0, 0)
         Me.rhtxtlog.Name = "rhtxtlog"
         Me.rhtxtlog.ReadOnly = True
-        Me.rhtxtlog.Size = New System.Drawing.Size(769, 277)
+        Me.rhtxtlog.Size = New System.Drawing.Size(555, 271)
         Me.rhtxtlog.TabIndex = 1
         Me.rhtxtlog.Text = ""
         '
@@ -150,6 +156,15 @@ Partial Class frmMain
         Me.StStatus.Name = "StStatus"
         Me.StStatus.Size = New System.Drawing.Size(778, 24)
         Me.StStatus.TabIndex = 2
+        '
+        'lblcores
+        '
+        Me.lblcores.BorderSides = CType((((System.Windows.Forms.ToolStripStatusLabelBorderSides.Left Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Top) _
+            Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Right) _
+            Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Bottom), System.Windows.Forms.ToolStripStatusLabelBorderSides)
+        Me.lblcores.BorderStyle = System.Windows.Forms.Border3DStyle.SunkenInner
+        Me.lblcores.Name = "lblcores"
+        Me.lblcores.Size = New System.Drawing.Size(4, 19)
         '
         'lblProcessorCount
         '
@@ -231,24 +246,66 @@ Partial Class frmMain
         Me.AboutToolStripMenuItem.Size = New System.Drawing.Size(107, 22)
         Me.AboutToolStripMenuItem.Text = "&About"
         '
-        'lblcores
+        'SplitContainer1
         '
-        Me.lblcores.BorderSides = CType((((System.Windows.Forms.ToolStripStatusLabelBorderSides.Left Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Top) _
-            Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Right) _
-            Or System.Windows.Forms.ToolStripStatusLabelBorderSides.Bottom), System.Windows.Forms.ToolStripStatusLabelBorderSides)
-        Me.lblcores.BorderStyle = System.Windows.Forms.Border3DStyle.SunkenInner
-        Me.lblcores.Name = "lblcores"
-        Me.lblcores.Size = New System.Drawing.Size(4, 19)
+        Me.SplitContainer1.Anchor = CType((((System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Bottom) _
+            Or System.Windows.Forms.AnchorStyles.Left) _
+            Or System.Windows.Forms.AnchorStyles.Right), System.Windows.Forms.AnchorStyles)
+        Me.SplitContainer1.BorderStyle = System.Windows.Forms.BorderStyle.Fixed3D
+        Me.SplitContainer1.Location = New System.Drawing.Point(5, 112)
+        Me.SplitContainer1.Name = "SplitContainer1"
+        '
+        'SplitContainer1.Panel1
+        '
+        Me.SplitContainer1.Panel1.Controls.Add(Me.rhtxtlog)
+        '
+        'SplitContainer1.Panel2
+        '
+        Me.SplitContainer1.Panel2.Controls.Add(Me.lstvCoreTemps)
+        Me.SplitContainer1.Size = New System.Drawing.Size(769, 275)
+        Me.SplitContainer1.SplitterDistance = 559
+        Me.SplitContainer1.TabIndex = 5
+        '
+        'lstvCoreTemps
+        '
+        Me.lstvCoreTemps.BorderStyle = System.Windows.Forms.BorderStyle.None
+        Me.lstvCoreTemps.Columns.AddRange(New System.Windows.Forms.ColumnHeader() {Me.clmcore, Me.clmCoreTemp})
+        Me.lstvCoreTemps.Dock = System.Windows.Forms.DockStyle.Fill
+        Me.lstvCoreTemps.GridLines = True
+        Me.lstvCoreTemps.HideSelection = False
+        Me.lstvCoreTemps.Location = New System.Drawing.Point(0, 0)
+        Me.lstvCoreTemps.Name = "lstvCoreTemps"
+        Me.lstvCoreTemps.Size = New System.Drawing.Size(202, 271)
+        Me.lstvCoreTemps.TabIndex = 4
+        Me.lstvCoreTemps.UseCompatibleStateImageBehavior = False
+        Me.lstvCoreTemps.View = System.Windows.Forms.View.Details
+        '
+        'clmcore
+        '
+        Me.clmcore.Text = "Core"
+        Me.clmcore.Width = 90
+        '
+        'clmCoreTemp
+        '
+        Me.clmCoreTemp.Text = "Core Temperature"
+        Me.clmCoreTemp.Width = 150
+        '
+        'imgcpu
+        '
+        Me.imgcpu.ImageStream = CType(resources.GetObject("imgcpu.ImageStream"), System.Windows.Forms.ImageListStreamer)
+        Me.imgcpu.TransparentColor = System.Drawing.Color.Transparent
+        Me.imgcpu.Images.SetKeyName(0, "processor.png")
         '
         'frmMain
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(6.0!, 13.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
         Me.ClientSize = New System.Drawing.Size(778, 414)
+        Me.Controls.Add(Me.SplitContainer1)
         Me.Controls.Add(Me.StStatus)
         Me.Controls.Add(Me.clawMenu)
-        Me.Controls.Add(Me.rhtxtlog)
         Me.Controls.Add(Me.grpClawHammer)
+        Me.DoubleBuffered = True
         Me.Font = New System.Drawing.Font("Consolas", 8.25!, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, CType(0, Byte))
         Me.Icon = CType(resources.GetObject("$this.Icon"), System.Drawing.Icon)
         Me.MainMenuStrip = Me.clawMenu
@@ -262,6 +319,10 @@ Partial Class frmMain
         Me.StStatus.PerformLayout()
         Me.clawMenu.ResumeLayout(False)
         Me.clawMenu.PerformLayout()
+        Me.SplitContainer1.Panel1.ResumeLayout(False)
+        Me.SplitContainer1.Panel2.ResumeLayout(False)
+        CType(Me.SplitContainer1, System.ComponentModel.ISupportInitialize).EndInit()
+        Me.SplitContainer1.ResumeLayout(False)
         Me.ResumeLayout(False)
         Me.PerformLayout()
 
@@ -286,4 +347,9 @@ Partial Class frmMain
     Friend WithEvents chkSaveLog As System.Windows.Forms.CheckBox
     Friend WithEvents cputemp As ToolStripStatusLabel
     Friend WithEvents lblcores As ToolStripStatusLabel
+    Friend WithEvents SplitContainer1 As SplitContainer
+    Friend WithEvents lstvCoreTemps As ListView
+    Friend WithEvents clmcore As ColumnHeader
+    Friend WithEvents clmCoreTemp As ColumnHeader
+    Friend WithEvents imgcpu As ImageList
 End Class

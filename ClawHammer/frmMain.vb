@@ -1,6 +1,9 @@
 ﻿Imports OpenHardwareMonitor
 Imports OpenHardwareMonitor.Hardware
 Imports System.Timers
+Imports System.Numerics
+Imports System.Reflection
+
 ' ----------------------------------------------------------------------------------------
 ' Author:                    Wimukthi Bandara
 ' Company:                   Grey Element Software
@@ -32,9 +35,16 @@ Public Class frmMain
     Public coreCount As Integer = 0
 
 
+    Public Shared Sub SetDoubleBuffered(ByVal control As Control)
+        GetType(Control).InvokeMember("DoubleBuffered", BindingFlags.SetProperty Or BindingFlags.Instance Or BindingFlags.NonPublic, Nothing, control, New Object() {True})
+    End Sub
+
     Sub SubCPUDatTimer(ByVal sender As Object, ByVal e As ElapsedEventArgs) 'CPU Data retrieval subroutine
         ' Write the SignalTime.
         Try
+
+
+
             Dim computer As New Computer()
             computer.Open()
             computer.CPUEnabled = True
@@ -46,13 +56,16 @@ Public Class frmMain
 
                 Dim tempSensors = cpu.Sensors.Where(Function(s) s.SensorType = SensorType.Temperature)
                 Dim CPUTEMPVAR As Integer = 0
+                lstvCoreTemps.Items.Clear()
+                lstvCoreTemps.BeginUpdate()
 
-
-                For i = 0 To tempSensors.ToList.Count - 1
+                For i = 0 To coreCount - 1
                     CPUTEMPVAR += tempSensors.ToList.Item(i).Value
+                    lstvCoreTemps.Items.Add("core " & i.ToString)
+                    lstvCoreTemps.Items(i).SubItems.Add(tempSensors.ToList.Item(i).Value & "°C")
                 Next
 
-
+                lstvCoreTemps.EndUpdate()
                 cputemp.Text = "CPU Temp: " & Conversion.Int(CPUTEMPVAR / coreCount) & "°C"
             End If
         Catch ex As Exception
@@ -76,6 +89,8 @@ Public Class frmMain
     Private Sub frmMain_Load(sender As System.Object, e As System.EventArgs) Handles MyBase.Load
 
         Try
+            SetDoubleBuffered(lstvCoreTemps) 'Enable double buffering for the Listview control
+
             Dim CpuDatTimer As Timer = New Timer(200) 'CPU Data retrieval timer
             AddHandler CpuDatTimer.Elapsed, New ElapsedEventHandler(AddressOf SubCPUDatTimer)
             CpuDatTimer.Start()
@@ -89,6 +104,8 @@ Public Class frmMain
             For Each item In New System.Management.ManagementObjectSearcher("Select * from Win32_Processor").[Get]()
                 coreCount += Integer.Parse(item("NumberOfCores").ToString())
             Next
+
+
 
             Me.Text = "ClawHammer v" + My.Application.Info.Version.ToString + " - [Idle]" ' Set the default title bar text
             NumThreads.Maximum = Environment.ProcessorCount 'get the Logical processor count
@@ -308,8 +325,4 @@ Public Class frmMain
             ThreadsArray.Item(1).Abort()
         End If
     End Sub
-
-
-
-
 End Class
