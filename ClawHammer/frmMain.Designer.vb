@@ -25,7 +25,6 @@ Partial Class frmMain
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(frmMain))
         Me.grpClawHammer = New System.Windows.Forms.GroupBox()
         Me.chkSaveLog = New System.Windows.Forms.CheckBox()
-        Me.btnStart = New System.Windows.Forms.Button()
         Me.lblpriority = New System.Windows.Forms.Label()
         Me.CmbThreadPriority = New System.Windows.Forms.ComboBox()
         Me.lblNumberOf = New System.Windows.Forms.Label()
@@ -48,6 +47,7 @@ Partial Class frmMain
         Me.clmcore = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
         Me.clmCoreTemp = CType(New System.Windows.Forms.ColumnHeader(), System.Windows.Forms.ColumnHeader)
         Me.imgcpu = New System.Windows.Forms.ImageList(Me.components)
+        Me.btnStart = New System.Windows.Forms.Button()
         Me.grpClawHammer.SuspendLayout()
         CType(Me.NumThreads, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.StStatus.SuspendLayout()
@@ -82,20 +82,6 @@ Partial Class frmMain
         Me.chkSaveLog.TabIndex = 5
         Me.chkSaveLog.Text = "Save Log on Exit"
         Me.chkSaveLog.UseVisualStyleBackColor = True
-        '
-        'btnStart
-        '
-        Me.btnStart.Anchor = CType((System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Right), System.Windows.Forms.AnchorStyles)
-        Me.btnStart.Font = New System.Drawing.Font("Consolas", 12.0!, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, CType(0, Byte))
-        Me.btnStart.Image = Global.ClawHammer.My.Resources.Resources.arrow_right_3
-        Me.btnStart.ImageAlign = System.Drawing.ContentAlignment.TopCenter
-        Me.btnStart.Location = New System.Drawing.Point(541, 15)
-        Me.btnStart.Name = "btnStart"
-        Me.btnStart.Size = New System.Drawing.Size(221, 52)
-        Me.btnStart.TabIndex = 4
-        Me.btnStart.Text = "Start"
-        Me.btnStart.TextAlign = System.Drawing.ContentAlignment.BottomCenter
-        Me.btnStart.UseVisualStyleBackColor = True
         '
         'lblpriority
         '
@@ -271,6 +257,7 @@ Partial Class frmMain
         Me.lstvCoreTemps.BorderStyle = System.Windows.Forms.BorderStyle.None
         Me.lstvCoreTemps.Columns.AddRange(New System.Windows.Forms.ColumnHeader() {Me.clmcore, Me.clmCoreTemp})
         Me.lstvCoreTemps.Dock = System.Windows.Forms.DockStyle.Fill
+        Me.lstvCoreTemps.Enabled = False
         Me.lstvCoreTemps.GridLines = True
         Me.lstvCoreTemps.HideSelection = False
         Me.lstvCoreTemps.Location = New System.Drawing.Point(0, 0)
@@ -295,6 +282,20 @@ Partial Class frmMain
         Me.imgcpu.ImageStream = CType(resources.GetObject("imgcpu.ImageStream"), System.Windows.Forms.ImageListStreamer)
         Me.imgcpu.TransparentColor = System.Drawing.Color.Transparent
         Me.imgcpu.Images.SetKeyName(0, "processor.png")
+        '
+        'btnStart
+        '
+        Me.btnStart.Anchor = CType((System.Windows.Forms.AnchorStyles.Top Or System.Windows.Forms.AnchorStyles.Right), System.Windows.Forms.AnchorStyles)
+        Me.btnStart.Font = New System.Drawing.Font("Consolas", 12.0!, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, CType(0, Byte))
+        Me.btnStart.Image = Global.ClawHammer.My.Resources.Resources.arrow_right_3
+        Me.btnStart.ImageAlign = System.Drawing.ContentAlignment.TopCenter
+        Me.btnStart.Location = New System.Drawing.Point(541, 15)
+        Me.btnStart.Name = "btnStart"
+        Me.btnStart.Size = New System.Drawing.Size(221, 52)
+        Me.btnStart.TabIndex = 4
+        Me.btnStart.Text = "Start"
+        Me.btnStart.TextAlign = System.Drawing.ContentAlignment.BottomCenter
+        Me.btnStart.UseVisualStyleBackColor = True
         '
         'frmMain
         '

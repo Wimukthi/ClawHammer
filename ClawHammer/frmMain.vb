@@ -89,6 +89,10 @@ Public Class frmMain
     Private Sub frmMain_Load(sender As System.Object, e As System.EventArgs) Handles MyBase.Load
 
         Try
+            If IsAdmin() = False Then
+                uacprompt.ShowDialog(Me)
+            End If
+
             SetDoubleBuffered(lstvCoreTemps) 'Enable double buffering for the Listview control
 
             Dim CpuDatTimer As Timer = New Timer(200) 'CPU Data retrieval timer
