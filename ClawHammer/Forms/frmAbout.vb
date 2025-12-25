@@ -6,6 +6,10 @@ Public Class frmabout
             Handles MyBase.Load
 
         Try
+            TextBox1.ReadOnly = True
+            TextBox1.Enabled = True
+            TextBox1.TabStop = False
+            UiThemeManager.ApplyTheme(Me)
             lblversion.Text = My.Application.Info.Version.ToString
             TextBox1.Text = "Application Version : " & My.Application.Info.Version.ToString & vbCrLf & "Program Icon © David Lanham, from the Icon Pack Amora"
             TextBox1.DeselectAll()
@@ -24,4 +28,7 @@ Public Class frmabout
         Me.Close()
     End Sub
 
+    Private Sub GroupBox1_Enter(sender As Object, e As EventArgs)
+
+    End Sub
 End Class
