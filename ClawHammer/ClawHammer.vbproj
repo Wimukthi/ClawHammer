@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0-windows7.0</TargetFramework>
     <Platforms>x86;x64</Platforms>
@@ -41,7 +41,7 @@
     <Company>Grey Element Software</Company>
     <Product>ClawHammer</Product>
     <Copyright>This software is licensed under GPL3</Copyright>
-    <VersionPrefix>1.3.7</VersionPrefix>
+    <VersionPrefix>1.3.8</VersionPrefix>
     <BuildCounterFile>$(MSBuildProjectDirectory)\build-counter.txt</BuildCounterFile>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x86' ">
@@ -113,6 +113,9 @@
   <ItemGroup>
     <Compile Update="Forms\frmAbout.Designer.vb">
       <DependentUpon>frmAbout.vb</DependentUpon>
+    </Compile>
+    <Compile Update="Forms\frmUpdate.Designer.vb">
+      <DependentUpon>frmUpdate.vb</DependentUpon>
     </Compile>
     <Compile Update="My Project\Application.Designer.vb">
       <AutoGen>True</AutoGen>
@@ -186,7 +189,13 @@
       <UserProperties BuildVersion_BuildVersioningStyle="None.None.None.Increment" BuildVersion_UpdateFileVersion="True" BuildVersion_UpdateAssemblyVersion="True" />
     </VisualStudio>
   </ProjectExtensions>
+  <ItemGroup>
+    <EmbeddedResource Update="Forms\frmUpdate.resx">
+      <DependentUpon>frmUpdate.vb</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>
+
 
 
 

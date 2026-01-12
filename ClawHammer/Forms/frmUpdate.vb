@@ -6,7 +6,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 
-Friend Class frmUpdate
+Friend Partial Class frmUpdate
     Inherits Form
 
     Private ReadOnly _release As UpdateReleaseInfo
@@ -17,138 +17,84 @@ Friend Class frmUpdate
     Private _tempRoot As String
     Private _downloadPath As String
 
-    Private ReadOnly _lblStatus As Label
-    Private ReadOnly _lblSpeed As Label
-    Private ReadOnly _lblProgress As Label
-    Private ReadOnly _progressBar As ProgressBar
-    Private ReadOnly _btnDownload As Button
-    Private ReadOnly _btnCancel As Button
-
     Public Sub New(release As UpdateReleaseInfo, currentVersion As Version)
+        InitializeComponent()
+
         _release = release
         _currentVersion = currentVersion
         _asset = UpdateService.SelectBestAsset(release)
         _palette = UiThemeManager.Palette
 
-        AutoScaleMode = AutoScaleMode.Dpi
-        AutoScaleDimensions = New SizeF(96.0F, 96.0F)
-        Text = "ClawHammer Updater"
-        StartPosition = FormStartPosition.CenterParent
-        MinimumSize = New Size(640, 520)
-        Size = New Size(740, 600)
+        Try
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)
+        Catch
+        End Try
 
+        AddHandler btnDownload.Click, AddressOf DownloadClicked
+        AddHandler btnCancel.Click, AddressOf CancelClicked
+        AddHandler btnRelease.Click, AddressOf OpenReleaseClicked
+
+        PopulateReleaseInfo()
+        ApplyTheme()
+
+        If _asset Is Nothing Then
+            btnDownload.Enabled = False
+            lblStatus.Text = "No compatible update package was found."
+        End If
+    End Sub
+
+    Private Sub PopulateReleaseInfo()
+        lblCurrentValue.Text = GetAppVersionDisplay()
+        lblLatestValue.Text = If(_release IsNot Nothing, FormatVersionDisplay(_release.Version), "Unknown")
+        lblPackageValue.Text = If(_asset IsNot Nothing, _asset.Name, "No compatible asset found")
+        txtReleaseNotes.Text = If(_release IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_release.Notes), _release.Notes, "No release notes provided.")
+        btnRelease.Enabled = (_release IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_release.HtmlUrl))
+    End Sub
+
+    Private Sub ApplyTheme()
         BackColor = _palette.Background
         ForeColor = _palette.Text
 
-        Dim root As New TableLayoutPanel() With {
-            .Dock = DockStyle.Fill,
-            .ColumnCount = 2,
-            .RowCount = 8,
-            .Padding = New Padding(16),
-            .BackColor = _palette.Background
-        }
-        root.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-        root.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+        tableRoot.BackColor = _palette.Background
+        tableDetails.BackColor = _palette.Background
+        panelProgress.BackColor = _palette.Background
+        tableProgress.BackColor = _palette.Background
+        tableStatus.BackColor = _palette.Background
+        flowButtons.BackColor = _palette.Background
 
-        Dim title As New Label() With {
-            .Text = "Update Available",
-            .AutoSize = True,
-            .Font = New Font(Font, FontStyle.Bold),
-            .ForeColor = _palette.Text
-        }
-        root.Controls.Add(title, 0, 0)
-        root.SetColumnSpan(title, 2)
+        txtReleaseNotes.BackColor = _palette.Surface
+        txtReleaseNotes.ForeColor = _palette.Text
 
-        Dim lblCurrentTitle As New Label() With {.Text = "Current:", .AutoSize = True, .ForeColor = _palette.TextMuted}
-        Dim lblCurrentValue As New Label() With {.Text = GetAppVersionDisplay(), .AutoSize = True, .ForeColor = _palette.Text}
-        root.Controls.Add(lblCurrentTitle, 0, 1)
-        root.Controls.Add(lblCurrentValue, 1, 1)
+        lblTitle.ForeColor = _palette.Text
+        lblCurrentTitle.ForeColor = _palette.TextMuted
+        lblLatestTitle.ForeColor = _palette.TextMuted
+        lblPackageTitle.ForeColor = _palette.TextMuted
+        lblNotesTitle.ForeColor = _palette.TextMuted
+        lblCurrentValue.ForeColor = _palette.Text
+        lblLatestValue.ForeColor = _palette.Text
+        lblPackageValue.ForeColor = _palette.Text
+        lblStatus.ForeColor = _palette.Text
+        lblProgress.ForeColor = _palette.TextMuted
+        lblSpeed.ForeColor = _palette.TextMuted
 
-        Dim lblLatestTitle As New Label() With {.Text = "Latest:", .AutoSize = True, .ForeColor = _palette.TextMuted}
-        Dim latestText As String = If(_release IsNot Nothing, FormatVersionDisplay(_release.Version), "Unknown")
-        Dim lblLatestValue As New Label() With {.Text = latestText, .AutoSize = True, .ForeColor = _palette.Text}
-        root.Controls.Add(lblLatestTitle, 0, 2)
-        root.Controls.Add(lblLatestValue, 1, 2)
-
-        Dim lblAssetTitle As New Label() With {.Text = "Package:", .AutoSize = True, .ForeColor = _palette.TextMuted}
-        Dim assetText As String = If(_asset IsNot Nothing, _asset.Name, "No compatible asset found")
-        Dim lblAssetValue As New Label() With {.Text = assetText, .AutoSize = True, .ForeColor = _palette.Text}
-        root.Controls.Add(lblAssetTitle, 0, 3)
-        root.Controls.Add(lblAssetValue, 1, 3)
-
-        Dim notesTitle As New Label() With {.Text = "Release notes:", .AutoSize = True, .ForeColor = _palette.TextMuted}
-        root.Controls.Add(notesTitle, 0, 4)
-        root.SetColumnSpan(notesTitle, 2)
-
-        Dim notesBox As New TextBox() With {
-            .Multiline = True,
-            .ReadOnly = True,
-            .ScrollBars = ScrollBars.Vertical,
-            .Dock = DockStyle.Fill,
-            .BackColor = _palette.Surface,
-            .ForeColor = _palette.Text,
-            .BorderStyle = BorderStyle.FixedSingle
-        }
-        notesBox.Text = If(_release IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_release.Notes), _release.Notes, "No release notes provided.")
-        root.Controls.Add(notesBox, 0, 5)
-        root.SetColumnSpan(notesBox, 2)
-
-        _progressBar = New ProgressBar() With {.Dock = DockStyle.Fill, .Minimum = 0, .Maximum = 100, .Value = 0}
-        root.Controls.Add(_progressBar, 0, 6)
-        root.SetColumnSpan(_progressBar, 2)
-
-        Dim statusPanel As New TableLayoutPanel() With {.Dock = DockStyle.Fill, .ColumnCount = 3}
-        statusPanel.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 50.0F))
-        statusPanel.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 25.0F))
-        statusPanel.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 25.0F))
-        _lblStatus = New Label() With {.Text = "Ready to download.", .AutoSize = True, .ForeColor = _palette.Text}
-        _lblProgress = New Label() With {.Text = "0 / 0", .AutoSize = True, .ForeColor = _palette.TextMuted, .TextAlign = ContentAlignment.MiddleRight}
-        _lblSpeed = New Label() With {.Text = "Speed: N/A", .AutoSize = True, .ForeColor = _palette.TextMuted, .TextAlign = ContentAlignment.MiddleRight}
-        statusPanel.Controls.Add(_lblStatus, 0, 0)
-        statusPanel.Controls.Add(_lblProgress, 1, 0)
-        statusPanel.Controls.Add(_lblSpeed, 2, 0)
-        root.Controls.Add(statusPanel, 0, 7)
-        root.SetColumnSpan(statusPanel, 2)
-
-        Dim buttonPanel As New FlowLayoutPanel() With {
-            .Dock = DockStyle.Bottom,
-            .FlowDirection = FlowDirection.RightToLeft,
-            .Padding = New Padding(0, 12, 0, 0),
-            .AutoSize = True,
-            .BackColor = _palette.Background
-        }
-
-        _btnDownload = New Button() With {.Text = "Download && Install", .AutoSize = True, .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
-        _btnDownload.FlatAppearance.BorderColor = _palette.Border
-        _btnDownload.FlatAppearance.BorderSize = 1
-        AddHandler _btnDownload.Click, AddressOf DownloadClicked
-
-        _btnCancel = New Button() With {.Text = "Close", .AutoSize = True, .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
-        _btnCancel.FlatAppearance.BorderColor = _palette.Border
-        _btnCancel.FlatAppearance.BorderSize = 1
-        AddHandler _btnCancel.Click, AddressOf CancelClicked
-
-        Dim btnRelease As New Button() With {.Text = "View Release", .AutoSize = True, .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
-        btnRelease.FlatAppearance.BorderColor = _palette.Border
-        btnRelease.FlatAppearance.BorderSize = 1
-        AddHandler btnRelease.Click, AddressOf OpenReleaseClicked
-
-        buttonPanel.Controls.Add(_btnCancel)
-        buttonPanel.Controls.Add(_btnDownload)
-        buttonPanel.Controls.Add(btnRelease)
-
-        Dim container As New Panel() With {.Dock = DockStyle.Fill, .BackColor = _palette.Background}
-        container.Controls.Add(root)
-        container.Controls.Add(buttonPanel)
-
-        Controls.Add(container)
+        ConfigureButton(btnDownload)
+        ConfigureButton(btnCancel)
+        ConfigureButton(btnRelease)
 
         UiThemeManager.ApplyTheme(Me)
+    End Sub
 
-        If _asset Is Nothing Then
-            _btnDownload.Enabled = False
-            _lblStatus.Text = "No compatible update package was found."
+    Private Sub ConfigureButton(button As Button)
+        If button Is Nothing Then
+            Return
         End If
+
+        button.UseVisualStyleBackColor = False
+        button.BackColor = _palette.Surface
+        button.ForeColor = _palette.Text
+        button.FlatStyle = FlatStyle.Flat
+        button.FlatAppearance.BorderColor = _palette.Border
+        button.FlatAppearance.BorderSize = 1
     End Sub
 
     Private Async Sub DownloadClicked(sender As Object, e As EventArgs)
@@ -157,10 +103,10 @@ Friend Class frmUpdate
         End If
 
         _cts = New CancellationTokenSource()
-        _btnDownload.Enabled = False
-        _btnCancel.Text = "Cancel"
-        _progressBar.Value = 0
-        _lblStatus.Text = "Downloading update..."
+        btnDownload.Enabled = False
+        btnCancel.Text = "Cancel"
+        progressDownload.Value = 0
+        lblStatus.Text = "Downloading update..."
 
         Try
             _tempRoot = CreateTempRoot()
@@ -171,23 +117,23 @@ Friend Class frmUpdate
             Await UpdateService.DownloadAssetAsync(_asset, _downloadPath, progress, _cts.Token)
 
             If _cts.IsCancellationRequested Then
-                _lblStatus.Text = "Download canceled."
-                _btnCancel.Text = "Close"
-                _btnDownload.Enabled = True
+                lblStatus.Text = "Download canceled."
+                btnCancel.Text = "Close"
+                btnDownload.Enabled = True
                 _cts = Nothing
                 Return
             End If
 
-            _lblStatus.Text = "Preparing update..."
+            lblStatus.Text = "Preparing update..."
             Await ApplyUpdateAsync(_downloadPath)
         Catch ex As OperationCanceledException
-            _lblStatus.Text = "Download canceled."
-            _btnCancel.Text = "Close"
-            _btnDownload.Enabled = True
+            lblStatus.Text = "Download canceled."
+            btnCancel.Text = "Close"
+            btnDownload.Enabled = True
         Catch ex As Exception
-            _lblStatus.Text = "Update failed: " & ex.Message
-            _btnCancel.Text = "Close"
-            _btnDownload.Enabled = True
+            lblStatus.Text = "Update failed: " & ex.Message
+            btnCancel.Text = "Close"
+            btnDownload.Enabled = True
         Finally
             _cts = Nothing
         End Try
@@ -195,7 +141,7 @@ Friend Class frmUpdate
 
     Private Sub CancelClicked(sender As Object, e As EventArgs)
         If _cts IsNot Nothing Then
-            _lblStatus.Text = "Canceling..."
+            lblStatus.Text = "Canceling..."
             _cts.Cancel()
             Return
         End If
@@ -213,11 +159,11 @@ Friend Class frmUpdate
     End Sub
 
     Private Sub UpdateProgress(info As DownloadProgressInfo)
-        _progressBar.Value = Math.Max(0, Math.Min(100, info.Percent))
+        progressDownload.Value = Math.Max(0, Math.Min(100, info.Percent))
         Dim totalText As String = If(info.TotalBytes > 0, UpdateService.FormatBytes(info.TotalBytes), "Unknown")
-        _lblProgress.Text = $"{UpdateService.FormatBytes(info.BytesReceived)} / {totalText}"
+        lblProgress.Text = $"{UpdateService.FormatBytes(info.BytesReceived)} / {totalText}"
         Dim speedText As String = If(info.SpeedBytesPerSec > 0, UpdateService.FormatBytes(CLng(info.SpeedBytesPerSec)) & "/s", "N/A")
-        _lblSpeed.Text = "Speed: " & speedText
+        lblSpeed.Text = "Speed: " & speedText
     End Sub
 
     Private Async Function ApplyUpdateAsync(downloadPath As String) As Task
