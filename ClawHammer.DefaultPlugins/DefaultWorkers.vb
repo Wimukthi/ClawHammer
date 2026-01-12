@@ -1,10 +1,11 @@
-Imports System.Threading
+﻿Imports System.Threading
 Imports System.Numerics
 Imports System.Diagnostics
+Imports ClawHammer.PluginContracts
 
 ' Worker kernels and validation helpers used by the stress engine.
 
-Public Enum StressTestType
+Friend Enum StressTestType
     IntegerPrimes
     FloatingPoint
     AVX
@@ -14,81 +15,7 @@ Public Enum StressTestType
     Blend
 End Enum
 
-Public Interface IStressWorker
-    ReadOnly Property KernelName As String
-    Sub Run(token As CancellationToken, reportProgress As Action(Of Integer), validation As ValidationSettings, reportError As Action(Of String), reportStatus As Action(Of String))
-End Interface
 
-' Shared validation configuration plus error tracking for the current run.
-Public Class ValidationSettings
-    Private _mode As Integer
-    Private _intervalMs As Integer
-    Private _batchSize As Integer
-    Private _errorCount As Integer
-    Private _lastError As String
-    Private ReadOnly _errorLock As New Object()
-
-    Public Sub New(Optional mode As ValidationMode = ValidationMode.Off, Optional intervalMs As Integer = 30000, Optional batchSize As Integer = 4096)
-        _mode = CInt(mode)
-        _intervalMs = Math.Max(250, intervalMs)
-        _batchSize = Math.Max(256, batchSize)
-    End Sub
-
-    Public Property Mode As ValidationMode
-        Get
-            Return CType(Threading.Volatile.Read(_mode), ValidationMode)
-        End Get
-        Set(value As ValidationMode)
-            Threading.Volatile.Write(_mode, CInt(value))
-        End Set
-    End Property
-
-    Public Property IntervalMs As Integer
-        Get
-            Return Threading.Volatile.Read(_intervalMs)
-        End Get
-        Set(value As Integer)
-            Threading.Volatile.Write(_intervalMs, Math.Max(250, value))
-        End Set
-    End Property
-
-    Public Property BatchSize As Integer
-        Get
-            Return Threading.Volatile.Read(_batchSize)
-        End Get
-        Set(value As Integer)
-            Threading.Volatile.Write(_batchSize, Math.Max(256, value))
-        End Set
-    End Property
-
-    Public ReadOnly Property ErrorCount As Integer
-        Get
-            Return Threading.Volatile.Read(_errorCount)
-        End Get
-    End Property
-
-    Public ReadOnly Property LastError As String
-        Get
-            SyncLock _errorLock
-                Return _lastError
-            End SyncLock
-        End Get
-    End Property
-
-    Public Sub Reset()
-        Threading.Volatile.Write(_errorCount, 0)
-        SyncLock _errorLock
-            _lastError = String.Empty
-        End SyncLock
-    End Sub
-
-    Public Sub RecordError(message As String)
-        Interlocked.Increment(_errorCount)
-        SyncLock _errorLock
-            _lastError = message
-        End SyncLock
-    End Sub
-End Class
 
 Friend Class ValidationScheduler
     Private _lastValidationMs As Long
@@ -140,7 +67,7 @@ Friend Structure XorShift64Star
     End Function
 End Structure
 
-Public Class StressTester
+Friend Class StressTester
     Public Property PrimeRangeMin As Long = 2
     Public Property PrimeRangeMax As Long = 25000000
     Public Property MemoryBufferBytes As Integer = 4 * 1024 * 1024
@@ -940,3 +867,6 @@ Public Class StressTester
         End Sub
     End Class
 End Class
+
+
+

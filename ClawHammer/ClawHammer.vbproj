@@ -98,6 +98,14 @@
     </PropertyGroup>
     <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(BuildCounter)" Overwrite="true" />
   </Target>
+  <Target Name="CopyPluginsToFolder" AfterTargets="Build">
+    <PropertyGroup>
+      <PluginsDir>$(TargetDir)plugins\</PluginsDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(PluginsDir)" />
+    <Copy SourceFiles="$(TargetDir)ClawHammer.DefaultPlugins.dll" DestinationFolder="$(PluginsDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)ClawHammer.DefaultPlugins.pdb" DestinationFolder="$(PluginsDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)ClawHammer.DefaultPlugins.pdb')" />
+  </Target>
   <ItemGroup>
     <Import Include="System.Drawing" />
     <Import Include="System.Windows.Forms" />
@@ -169,11 +177,16 @@
     <PackageReference Include="System.Data.DataSetExtensions" Version="4.5.0" />
     <PackageReference Include="System.Management" Version="10.0.1" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ClawHammer.PluginContracts\ClawHammer.PluginContracts.vbproj" />
+    <ProjectReference Include="..\ClawHammer.DefaultPlugins\ClawHammer.DefaultPlugins.vbproj" />
+  </ItemGroup>
   <ProjectExtensions>
     <VisualStudio>
       <UserProperties BuildVersion_BuildVersioningStyle="None.None.None.Increment" BuildVersion_UpdateFileVersion="True" BuildVersion_UpdateAssemblyVersion="True" />
     </VisualStudio>
   </ProjectExtensions>
 </Project>
+
 
 

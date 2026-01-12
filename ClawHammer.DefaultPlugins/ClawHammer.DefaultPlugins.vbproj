@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClawHammer.PluginContracts\ClawHammer.PluginContracts.vbproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <RootNamespace>ClawHammer.DefaultPlugins</RootNamespace>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>

@@ -46,15 +46,19 @@ Partial Class frmMain
         progCPUUsage = New ToolStripProgressBar()
         clawMenu = New MenuStrip()
         FileToolStripMenuItem = New ToolStripMenuItem()
-        ExitToolStripMenuItem = New ToolStripMenuItem()
-        ToolsToolStripMenuItem = New ToolStripMenuItem()
-        RunOptionsToolStripMenuItem = New ToolStripMenuItem()
-        TemperaturePlotToolStripMenuItem = New ToolStripMenuItem()
-        CoreAffinityToolStripMenuItem = New ToolStripMenuItem()
-        SaveProfileToolStripMenuItem = New ToolStripMenuItem()
         LoadProfileToolStripMenuItem = New ToolStripMenuItem()
-        SystemInfoToolStripMenuItem = New ToolStripMenuItem()
+        SaveProfileToolStripMenuItem = New ToolStripMenuItem()
         ExportReportToolStripMenuItem = New ToolStripMenuItem()
+        ExitToolStripMenuItem = New ToolStripMenuItem()
+        ViewToolStripMenuItem = New ToolStripMenuItem()
+        TemperaturePlotToolStripMenuItem = New ToolStripMenuItem()
+        SystemInfoToolStripMenuItem = New ToolStripMenuItem()
+        ValidationMonitorToolStripMenuItem = New ToolStripMenuItem()
+        SettingsToolStripMenuItem = New ToolStripMenuItem()
+        RunOptionsToolStripMenuItem = New ToolStripMenuItem()
+        CoreAffinityToolStripMenuItem = New ToolStripMenuItem()
+        ToolsToolStripMenuItem = New ToolStripMenuItem()
+        PluginManagerToolStripMenuItem = New ToolStripMenuItem()
         HelpToolStripMenuItem = New ToolStripMenuItem()
         CheckForUpdatesToolStripMenuItem = New ToolStripMenuItem()
         AboutToolStripMenuItem = New ToolStripMenuItem()
@@ -278,7 +282,7 @@ Partial Class frmMain
         ' 
         ' clawMenu
         ' 
-        clawMenu.Items.AddRange(New ToolStripItem() {FileToolStripMenuItem, ToolsToolStripMenuItem, HelpToolStripMenuItem})
+        clawMenu.Items.AddRange(New ToolStripItem() {FileToolStripMenuItem, ViewToolStripMenuItem, SettingsToolStripMenuItem, ToolsToolStripMenuItem, HelpToolStripMenuItem})
         clawMenu.Location = New Point(0, 0)
         clawMenu.Name = "clawMenu"
         clawMenu.RenderMode = ToolStripRenderMode.System
@@ -288,11 +292,24 @@ Partial Class frmMain
         ' 
         ' FileToolStripMenuItem
         ' 
-        FileToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {ExitToolStripMenuItem})
+        FileToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {LoadProfileToolStripMenuItem, SaveProfileToolStripMenuItem, ExportReportToolStripMenuItem, ExitToolStripMenuItem})
         FileToolStripMenuItem.Name = "FileToolStripMenuItem"
         FileToolStripMenuItem.Size = New Size(37, 20)
         FileToolStripMenuItem.Text = "&File"
+        '
+        ' ViewToolStripMenuItem
         ' 
+        ViewToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {TemperaturePlotToolStripMenuItem, ValidationMonitorToolStripMenuItem, SystemInfoToolStripMenuItem})
+        ViewToolStripMenuItem.Name = "ViewToolStripMenuItem"
+        ViewToolStripMenuItem.Size = New Size(44, 20)
+        ViewToolStripMenuItem.Text = "&View"
+        ' 
+        ' SettingsToolStripMenuItem
+        ' 
+        SettingsToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {RunOptionsToolStripMenuItem, CoreAffinityToolStripMenuItem})
+        SettingsToolStripMenuItem.Name = "SettingsToolStripMenuItem"
+        SettingsToolStripMenuItem.Size = New Size(66, 20)
+        SettingsToolStripMenuItem.Text = "&Settings"
         ' ExitToolStripMenuItem
         ' 
         ExitToolStripMenuItem.Name = "ExitToolStripMenuItem"
@@ -302,7 +319,7 @@ Partial Class frmMain
         ' 
         ' ToolsToolStripMenuItem
         ' 
-        ToolsToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {RunOptionsToolStripMenuItem, TemperaturePlotToolStripMenuItem, CoreAffinityToolStripMenuItem, SaveProfileToolStripMenuItem, LoadProfileToolStripMenuItem, SystemInfoToolStripMenuItem, ExportReportToolStripMenuItem})
+        ToolsToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {PluginManagerToolStripMenuItem})
         ToolsToolStripMenuItem.Name = "ToolsToolStripMenuItem"
         ToolsToolStripMenuItem.Size = New Size(47, 20)
         ToolsToolStripMenuItem.Text = "&Tools"
@@ -313,6 +330,12 @@ Partial Class frmMain
         RunOptionsToolStripMenuItem.ShortcutKeys = Keys.Control Or Keys.Shift Or Keys.O
         RunOptionsToolStripMenuItem.Size = New Size(257, 22)
         RunOptionsToolStripMenuItem.Text = "Run Options"
+        ' 
+        ' PluginManagerToolStripMenuItem
+        ' 
+        PluginManagerToolStripMenuItem.Name = "PluginManagerToolStripMenuItem"
+        PluginManagerToolStripMenuItem.Size = New Size(257, 22)
+        PluginManagerToolStripMenuItem.Text = "Plugin Manager..."
         ' 
         ' TemperaturePlotToolStripMenuItem
         ' 
@@ -348,6 +371,12 @@ Partial Class frmMain
         SystemInfoToolStripMenuItem.ShortcutKeys = Keys.Control Or Keys.Shift Or Keys.I
         SystemInfoToolStripMenuItem.Size = New Size(257, 22)
         SystemInfoToolStripMenuItem.Text = "System Info Snapshot"
+        ' 
+        ' ValidationMonitorToolStripMenuItem
+        ' 
+        ValidationMonitorToolStripMenuItem.Name = "ValidationMonitorToolStripMenuItem"
+        ValidationMonitorToolStripMenuItem.Size = New Size(257, 22)
+        ValidationMonitorToolStripMenuItem.Text = "Validation Monitor"
         ' 
         ' ExportReportToolStripMenuItem
         ' 
@@ -479,14 +508,18 @@ Partial Class frmMain
     Friend WithEvents LblActiveThreads As System.Windows.Forms.ToolStripStatusLabel
     Friend WithEvents clawMenu As System.Windows.Forms.MenuStrip
     Friend WithEvents FileToolStripMenuItem As System.Windows.Forms.ToolStripMenuItem
+    Friend WithEvents ViewToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents SettingsToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents ExitToolStripMenuItem As System.Windows.Forms.ToolStripMenuItem
     Friend WithEvents ToolsToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents RunOptionsToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents PluginManagerToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents TemperaturePlotToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents CoreAffinityToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents SaveProfileToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents LoadProfileToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents SystemInfoToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents ValidationMonitorToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents ExportReportToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents HelpToolStripMenuItem As System.Windows.Forms.ToolStripMenuItem
     Friend WithEvents CheckForUpdatesToolStripMenuItem As ToolStripMenuItem
@@ -511,3 +544,11 @@ Partial Class frmMain
     Friend WithEvents cmbProfiles As ComboBox
     Friend WithEvents lblThroughput As Label ' Declaration for the new label
 End Class
+
+
+
+
+
+
+
+

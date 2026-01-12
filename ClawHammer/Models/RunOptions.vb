@@ -1,11 +1,6 @@
+﻿Imports ClawHammer.PluginContracts
 Imports System.IO
 Imports System.Text.Json
-
-Public Enum ValidationMode
-    Off
-    Light
-    Full
-End Enum
 
 Public Class RunOptions
     Public Property TimedRunMinutes As Integer = 0
@@ -14,8 +9,6 @@ Public Class RunOptions
     Public Property UiSnappyMode As Boolean = False
     Public Property TelemetryEnabled As Boolean = False
     Public Property TelemetryIntervalMs As Integer = 1000
-    ' Toggle advanced workload visibility in the workload selector.
-    Public Property ShowAdvancedWorkloads As Boolean = False
     Private _validationMode As ValidationMode = ValidationMode.Off
     ' Validation mode controls self-test and periodic checks in workers.
     Public Property ValidationMode As ValidationMode
@@ -81,3 +74,5 @@ Public Module ProfileManager
         Return JsonSerializer.Deserialize(Of ProfileData)(json, options)
     End Function
 End Module
+
+

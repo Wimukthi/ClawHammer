@@ -17,8 +17,11 @@ End Class
 Public Class UiLayoutStore
     Public Property MainWindow As UiWindowLayout = New UiWindowLayout()
     Public Property TempPlotWindow As UiWindowLayout = New UiWindowLayout()
+
+    Public Property ValidationMonitorWindow As UiWindowLayout = New UiWindowLayout()
     Public Property TempPlotSelectedSensors As List(Of String) = New List(Of String)()
     Public Property TempPlotSelectionSet As Boolean = False
+    Public Property TempPlotRefreshIntervalMs As Integer = 200
 End Class
 
 Public Module UiLayoutManager
@@ -81,8 +84,14 @@ Public Module UiLayoutManager
             If layout.TempPlotWindow Is Nothing Then
                 layout.TempPlotWindow = New UiWindowLayout()
             End If
+            If layout.ValidationMonitorWindow Is Nothing Then
+                layout.ValidationMonitorWindow = New UiWindowLayout()
+            End If
             If layout.TempPlotSelectedSensors Is Nothing Then
                 layout.TempPlotSelectedSensors = New List(Of String)()
+            End If
+            If layout.TempPlotRefreshIntervalMs <= 0 Then
+                layout.TempPlotRefreshIntervalMs = 200
             End If
             Return layout
         Catch
@@ -206,3 +215,6 @@ Public Module UiLayoutManager
         Return New Rectangle(x, y, width, height)
     End Function
 End Module
+
+
+

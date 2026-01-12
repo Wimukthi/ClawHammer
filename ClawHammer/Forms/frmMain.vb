@@ -1,4 +1,4 @@
-﻿Imports LibreHardwareMonitor
+Imports LibreHardwareMonitor
 Imports LibreHardwareMonitor.Hardware
 Imports System.Timers
 Imports System.Numerics
@@ -11,6 +11,7 @@ Imports System.IO
 Imports System.Text.Json
 Imports System.Threading.Tasks
 Imports System.Linq
+Imports ClawHammer.PluginContracts
 
 
 Public Class frmMain
@@ -31,7 +32,7 @@ Public Class frmMain
     Private Const MinValuePrime As Long = 2
     Private Const MaxValuePrime As Long = 25000000
     Public ThreadsArray As List(Of Threading.Thread) = New List(Of Threading.Thread)
-    Private _stressTester As New StressTester()
+    Private _pluginRegistry As New StressPluginRegistry()
     Private perfCPU As New _
         System.Diagnostics.PerformanceCounter(
             "Processor", "% Processor Time", "_Total")
@@ -121,9 +122,10 @@ Public Class frmMain
     Private _lastAvgText As String = "CPU Temp: N/A"
     Private _sensorMinMax As Dictionary(Of String, SensorMinMax) = New Dictionary(Of String, SensorMinMax)(StringComparer.OrdinalIgnoreCase)
     Private _uiLayoutMissing As Boolean = False
-    Private ReadOnly _validationStatusByWorker As New Dictionary(Of Integer, String)()
+    Private ReadOnly _validationStatusByWorker As New Dictionary(Of Integer, ValidationStatusSnapshot)()
     Private ReadOnly _validationStatusLock As New Object()
-    Private Const ValidationLogPrefix As String = "Validation Status: "
+    Private _validationSummarySuffix As String = String.Empty
+    Private _validationMonitor As frmValidationMonitor
     Private _toolTipMain As ToolTip
     Private _sensorAccessWarningLogged As Integer = 0
 
@@ -514,6 +516,11 @@ Public Class frmMain
             Dim selectionSet As Boolean = _tempPlotForm.SelectionSet
             _uiLayout.TempPlotSelectionSet = selectionSet
             _uiLayout.TempPlotSelectedSensors = If(selectionSet, _tempPlotForm.GetSelectedSensors(), New List(Of String)())
+            _uiLayout.TempPlotRefreshIntervalMs = _tempPlotForm.RefreshIntervalMs
+        End If
+
+        If _validationMonitor IsNot Nothing AndAlso Not _validationMonitor.IsDisposed Then
+            UiLayoutManager.CaptureWindowLayout(_validationMonitor, _uiLayout.ValidationMonitorWindow)
         End If
 
         UiLayoutManager.SaveLayout(_uiLayout)
@@ -532,6 +539,20 @@ Public Class frmMain
         Dim selectionSet As Boolean = _tempPlotForm.SelectionSet
         _uiLayout.TempPlotSelectionSet = selectionSet
         _uiLayout.TempPlotSelectedSensors = If(selectionSet, _tempPlotForm.GetSelectedSensors(), New List(Of String)())
+        _uiLayout.TempPlotRefreshIntervalMs = _tempPlotForm.RefreshIntervalMs
+        UiLayoutManager.SaveLayout(_uiLayout)
+    End Sub
+
+    Private Sub SaveValidationMonitorLayout()
+        If _validationMonitor Is Nothing OrElse _validationMonitor.IsDisposed Then
+            Return
+        End If
+
+        If _uiLayout Is Nothing Then
+            _uiLayout = UiLayoutManager.LoadLayout()
+        End If
+
+        UiLayoutManager.CaptureWindowLayout(_validationMonitor, _uiLayout.ValidationMonitorWindow)
         UiLayoutManager.SaveLayout(_uiLayout)
     End Sub
 
@@ -1247,14 +1268,26 @@ Public Class frmMain
             CmbThreadPriority.Text = "Normal"
             lblProcessorCount.Text = Environment.ProcessorCount.ToString + " Hardware Threads"
             lblcores.Text = coreCount & " Physical Cores"
+
+            initForm.SetStatus("Loading stress plugins...")
+            initForm.AddDetail("Applying pending plugin installs.")
+            PluginInstallManager.ApplyPending(AddressOf LogMessage)
+
+            initForm.AddDetail("Loading stress workloads.")
+            Dim pluginSettings As PluginSettings = PluginSettingsStore.LoadSettings()
+            Dim disabledIds As New HashSet(Of String)(pluginSettings.DisabledPluginIds, StringComparer.OrdinalIgnoreCase)
+            _pluginRegistry.LoadPlugins(AddressOf LogMessage, disabledIds)
+            If _pluginRegistry.GetPlugins().Count = 0 Then
+                initForm.AddDetail("No stress plugins detected.")
+            End If
             cmbStressType.Items.Clear()
-            UpdateStressModeList(StressTestType.FloatingPoint)
+            UpdateStressModeList(DefaultPluginIds.FloatingPoint)
 
             initForm.SetStatus("Loading profiles...")
             initForm.AddDetail("Loading saved profiles.")
             InitializeProfiles()
             initForm.AddDetail($"Active profile: {_currentProfileName}.")
-            UpdateValidationStatusText()
+            ClearValidationStatus()
             InitializeToolTips()
 
             LogMessage("ClawHammer Startup Successful")
@@ -1331,13 +1364,29 @@ Public Class frmMain
             If Integer.TryParse(parts(1), workerId) Then
                 Dim kernel As String = parts(2)
                 Dim detail As String = parts(3)
-                Dim entry As String = $"W{workerId}:{kernel} {detail}"
-                Dim summary As String
+                Dim snapshot As List(Of ValidationStatusSnapshot) = Nothing
+
                 SyncLock _validationStatusLock
-                    _validationStatusByWorker(workerId) = entry
-                    summary = String.Join(" | ", _validationStatusByWorker.OrderBy(Function(kvp) kvp.Key).Select(Function(kvp) kvp.Value))
+                    _validationStatusByWorker(workerId) = New ValidationStatusSnapshot With {
+                        .WorkerId = workerId,
+                        .Kernel = kernel,
+                        .Detail = detail,
+                        .UpdatedUtc = DateTime.UtcNow
+                    }
+
+                    snapshot = New List(Of ValidationStatusSnapshot)(_validationStatusByWorker.Count)
+                    For Each entry As ValidationStatusSnapshot In _validationStatusByWorker.Values
+                        snapshot.Add(New ValidationStatusSnapshot With {
+                            .WorkerId = entry.WorkerId,
+                            .Kernel = entry.Kernel,
+                            .Detail = entry.Detail,
+                            .UpdatedUtc = entry.UpdatedUtc
+                        })
+                    Next
                 End SyncLock
-                UpdateValidationStatusLine(ValidationLogPrefix & summary)
+
+                snapshot.Sort(Function(a, b) a.WorkerId.CompareTo(b.WorkerId))
+                UpdateValidationDisplay(snapshot)
                 Return
             End If
         End If
@@ -1345,34 +1394,90 @@ Public Class frmMain
         LogMessage(rawMessage)
     End Sub
 
-    Private Sub UpdateValidationStatusLine(text As String)
+    Private Sub ClearValidationStatus()
+        SyncLock _validationStatusLock
+            _validationStatusByWorker.Clear()
+        End SyncLock
+
+        _validationSummarySuffix = String.Empty
+        UpdateValidationDisplay(New List(Of ValidationStatusSnapshot)())
+    End Sub
+
+    Private Function GetValidationStatusSnapshot() As List(Of ValidationStatusSnapshot)
+        Dim snapshot As New List(Of ValidationStatusSnapshot)()
+        SyncLock _validationStatusLock
+            For Each entry As ValidationStatusSnapshot In _validationStatusByWorker.Values
+                snapshot.Add(New ValidationStatusSnapshot With {
+                    .WorkerId = entry.WorkerId,
+                    .Kernel = entry.Kernel,
+                    .Detail = entry.Detail,
+                    .UpdatedUtc = entry.UpdatedUtc
+                })
+            Next
+        End SyncLock
+        snapshot.Sort(Function(a, b) a.WorkerId.CompareTo(b.WorkerId))
+        Return snapshot
+    End Function
+
+    Private Sub UpdateValidationDisplay(Optional snapshot As List(Of ValidationStatusSnapshot) = Nothing)
+        Dim entries As List(Of ValidationStatusSnapshot) = If(snapshot, GetValidationStatusSnapshot())
+        Dim workerCount As Integer = If(entries IsNot Nothing, entries.Count, 0)
+
+        Dim mode As ValidationMode = ValidationMode.Off
+        Dim isRunning As Boolean = btnStart IsNot Nothing AndAlso btnStart.Text = "Stop"
+        If isRunning AndAlso _validationSettings IsNot Nothing Then
+            mode = _validationSettings.Mode
+        Else
+            mode = _runOptions.ValidationMode
+        End If
+
+        If mode = ValidationMode.Off OrElse workerCount = 0 Then
+            _validationSummarySuffix = String.Empty
+        Else
+            _validationSummarySuffix = $"Workers: {workerCount}"
+        End If
+
+        Dim tooltip As String = BuildValidationTooltip(entries, mode)
+
         Dim updateAction As Action = Sub()
-                                         Dim lines As String() = rhtxtlog.Lines
-                                         Dim index As Integer = -1
-                                         For i As Integer = lines.Length - 1 To 0 Step -1
-                                             If lines(i).StartsWith(ValidationLogPrefix, StringComparison.OrdinalIgnoreCase) Then
-                                                 index = i
-                                                 Exit For
-                                             End If
-                                         Next
-
-                                         If index >= 0 Then
-                                             lines(index) = text
-                                         Else
-                                             Dim newLines As New List(Of String)(lines)
-                                             newLines.Add(text)
-                                             lines = newLines.ToArray()
+                                         UpdateValidationStatusText()
+                                         If lblValidation IsNot Nothing Then
+                                             lblValidation.ToolTipText = tooltip
                                          End If
-
-                                         rhtxtlog.Lines = lines
+                                         If _validationMonitor IsNot Nothing AndAlso Not _validationMonitor.IsDisposed Then
+                                             _validationMonitor.UpdateStatuses(entries)
+                                         End If
                                      End Sub
 
-        If rhtxtlog.InvokeRequired Then
-            rhtxtlog.BeginInvoke(updateAction)
+        If Me.InvokeRequired Then
+            Me.BeginInvoke(updateAction)
         Else
             updateAction()
         End If
     End Sub
+
+    Private Function BuildValidationTooltip(entries As List(Of ValidationStatusSnapshot), mode As ValidationMode) As String
+        If mode = ValidationMode.Off Then
+            Return "Validation is disabled."
+        End If
+        If entries Is Nothing OrElse entries.Count = 0 Then
+            Return "Validation is running; awaiting status updates."
+        End If
+
+        Dim lines As New List(Of String)()
+        Dim maxLines As Integer = 8
+        Dim count As Integer = Math.Min(maxLines, entries.Count)
+        For i As Integer = 0 To count - 1
+            Dim entry As ValidationStatusSnapshot = entries(i)
+            Dim timeText As String = entry.UpdatedUtc.ToLocalTime().ToString("HH:mm:ss")
+            lines.Add($"W{entry.WorkerId} {entry.Kernel}: {entry.Detail} ({timeText})")
+        Next
+        If entries.Count > maxLines Then
+            lines.Add($"+{entries.Count - maxLines} more...")
+        End If
+
+        Return String.Join(Environment.NewLine, lines)
+    End Function
 
     Private Sub InitializeToolTips()
         If _toolTipMain Is Nothing Then
@@ -1388,24 +1493,28 @@ Public Class frmMain
         tip.SetToolTip(grpClawHammer, "Configure workload, threads, and run settings.")
         tip.SetToolTip(NumThreads, "Number of worker threads for the stress test." & vbCrLf & "Higher values use more CPU.")
         tip.SetToolTip(CmbThreadPriority, "Windows priority for worker threads." & vbCrLf & "Higher can affect system responsiveness.")
-        tip.SetToolTip(cmbStressType, "Select the workload type to run." & vbCrLf & "Advanced modes can be shown in Run Options.")
-        tip.SetToolTip(cmbProfiles, "Saved profiles for quick setup." & vbCrLf & "Use Tools to save or load profiles.")
+        tip.SetToolTip(cmbStressType, "Select the workload type to run." & vbCrLf & "Includes all installed plugins.")
+        tip.SetToolTip(cmbProfiles, "Saved profiles for quick setup." & vbCrLf & "Use File to save or load profiles.")
         tip.SetToolTip(chkSaveLog, "Save the session log on exit." & vbCrLf & "Stored alongside the executable.")
         tip.SetToolTip(btnStart, "Start or stop the stress test.")
         tip.SetToolTip(lblThroughput, "Estimated operations per second from worker threads.")
-        tip.SetToolTip(rhtxtlog, "Live event log." & vbCrLf & "Validation status updates in place.")
+        tip.SetToolTip(rhtxtlog, "Live event log." & vbCrLf & "Validation details are shown in the Validation Monitor.")
         tip.SetToolTip(lstvCoreTemps, "Sensor tree with current, min, and max readings.")
 
         clawMenu.ShowItemToolTips = True
         FileToolStripMenuItem.ToolTipText = "File actions."
         ExitToolStripMenuItem.ToolTipText = "Exit the application."
-        ToolsToolStripMenuItem.ToolTipText = "Run options and utilities."
+        ViewToolStripMenuItem.ToolTipText = "Monitoring views and snapshots."
+        SettingsToolStripMenuItem.ToolTipText = "Run options and CPU affinity."
+        ToolsToolStripMenuItem.ToolTipText = "Plugin management."
         RunOptionsToolStripMenuItem.ToolTipText = "Configure run behavior, validation, telemetry, and advanced modes."
+        PluginManagerToolStripMenuItem.ToolTipText = "Manage installed and online stress test plugins."
         TemperaturePlotToolStripMenuItem.ToolTipText = "Open the live temperature plot window."
         CoreAffinityToolStripMenuItem.ToolTipText = "Choose CPU cores for worker threads."
         SaveProfileToolStripMenuItem.ToolTipText = "Save current settings to a profile."
         LoadProfileToolStripMenuItem.ToolTipText = "Load a saved profile."
         SystemInfoToolStripMenuItem.ToolTipText = "Log system info to the output window."
+        ValidationMonitorToolStripMenuItem.ToolTipText = "View live validation status per worker."
         ExportReportToolStripMenuItem.ToolTipText = "Export run settings and log to an HTML report."
         HelpToolStripMenuItem.ToolTipText = "Help, updates, and about."
         CheckForUpdatesToolStripMenuItem.ToolTipText = "Check GitHub for new ClawHammer releases."
@@ -1417,7 +1526,7 @@ Public Class frmMain
         LblActiveThreads.ToolTipText = "Active stress worker threads."
         cputemp.ToolTipText = "Average CPU temperature summary."
         lblusage.ToolTipText = "Current CPU usage."
-        lblValidation.ToolTipText = "Validation mode and error count."
+        lblValidation.ToolTipText = "Validation summary. Open the Validation Monitor for details."
         progCPUUsage.ToolTipText = "CPU usage meter."
     End Sub
 
@@ -1468,14 +1577,20 @@ Public Class frmMain
         Else
             mode = _runOptions.ValidationMode
         End If
-
+        Dim baseText As String
         If mode = ValidationMode.Off Then
-            _validationStatusText = "Validation: Off"
+            _validationSummarySuffix = String.Empty
+            baseText = "Validation: Off"
         ElseIf errors > 0 Then
-            _validationStatusText = $"Validation: {mode} (Errors: {errors})"
+            baseText = $"Validation: {mode} (Errors: {errors})"
         Else
-            _validationStatusText = $"Validation: {mode}"
+            baseText = $"Validation: {mode}"
         End If
+
+        If Not String.IsNullOrWhiteSpace(_validationSummarySuffix) Then
+            baseText &= " | " & _validationSummarySuffix
+        End If
+        _validationStatusText = baseText
 
         If lblValidation Is Nothing Then
             Return
@@ -2366,51 +2481,7 @@ Public Class frmMain
         Return count
     End Function
 
-    Private Function SelectMixedWorkload(threadIndex As Integer, avxAvailable As Boolean) As StressTestType
-        If avxAvailable Then
-            Select Case threadIndex Mod 3
-                Case 0
-                    Return StressTestType.FloatingPoint
-                Case 1
-                    Return StressTestType.IntegerPrimes
-                Case Else
-                    Return StressTestType.AVX
-            End Select
-        End If
 
-        If threadIndex Mod 2 = 0 Then
-            Return StressTestType.FloatingPoint
-        End If
-        Return StressTestType.IntegerPrimes
-    End Function
-
-    Private Function SelectBlendWorkload(threadIndex As Integer, avxAvailable As Boolean) As StressTestType
-        If avxAvailable Then
-            Select Case threadIndex Mod 5
-                Case 0
-                    Return StressTestType.FloatingPoint
-                Case 1
-                    Return StressTestType.IntegerPrimes
-                Case 2
-                    Return StressTestType.IntegerHeavy
-                Case 3
-                    Return StressTestType.MemoryBandwidth
-                Case Else
-                    Return StressTestType.AVX
-            End Select
-        End If
-
-        Select Case threadIndex Mod 4
-            Case 0
-                Return StressTestType.FloatingPoint
-            Case 1
-                Return StressTestType.IntegerPrimes
-            Case 2
-                Return StressTestType.IntegerHeavy
-            Case Else
-                Return StressTestType.MemoryBandwidth
-        End Select
-    End Function
 
     Private Sub StartStressTest()
         btnStart.Text = "Stop"
@@ -2431,45 +2502,52 @@ Public Class frmMain
         AddHandler _throughputTimer.Tick, AddressOf _throughputTimer_Tick
         _throughputTimer.Start()
 
-        Dim selectedTestType As StressTestType = GetSelectedStressType()
-        LogMessage($"Starting {GetStressModeLabel(selectedTestType)} Stress Test...")
-
-        Dim avxAvailable As Boolean = Vector.IsHardwareAccelerated
-        If selectedTestType = StressTestType.AVX AndAlso Not avxAvailable Then
-            LogMessage("AVX selected but SIMD acceleration is not available. Falling back to FloatingPoint.")
-            selectedTestType = StressTestType.FloatingPoint
-            SetSelectedStressType(selectedTestType)
+        Dim selectedPluginId As String = GetSelectedStressPluginId()
+        Dim selectedPlugin As IStressPlugin = Nothing
+        If Not _pluginRegistry.TryGetPlugin(selectedPluginId, selectedPlugin) Then
+            LogMessage("Selected workload plugin unavailable. Falling back to Floating Point.")
+            selectedPluginId = DefaultPluginIds.FloatingPoint
+            SetSelectedStressPlugin(selectedPluginId)
+            _pluginRegistry.TryGetPlugin(selectedPluginId, selectedPlugin)
         End If
+
+        LogMessage($"Starting {GetStressModeLabel(selectedPluginId)} Stress Test...")
 
         cts = New Threading.CancellationTokenSource()
         Dim token As Threading.CancellationToken = cts.Token
         ThreadsArray.Clear()
 
-        _stressTester.PrimeRangeMin = MinValuePrime
-        _stressTester.PrimeRangeMax = MaxValuePrime
+        _pluginRegistry.PrimeRangeMin = MinValuePrime
+        _pluginRegistry.PrimeRangeMax = MaxValuePrime
         StartValidation(True)
         Dim validationSettings As ValidationSettings = _validationSettings
         Dim reportError As Action(Of String) = Sub(message)
                                                    LogMessage(message)
-                                                   UpdateValidationStatusText()
+                                                   UpdateValidationDisplay()
                                                    TriggerAutoStop(message)
                                                End Sub
         Dim reportStatus As Action(Of String) = Sub(message)
                                                     HandleValidationStatusMessage(message)
                                                 End Sub
 
-        SyncLock _validationStatusLock
-            _validationStatusByWorker.Clear()
-        End SyncLock
-        If _runOptions.ValidationMode = ValidationMode.Off Then
-            UpdateValidationStatusLine(ValidationLogPrefix & "Off")
-        Else
-            UpdateValidationStatusLine(ValidationLogPrefix & "Starting...")
-        End If
+        ClearValidationStatus()
 
         Dim threadCount As Integer = GetEffectiveThreadCount()
         If _runOptions.UiSnappyMode AndAlso threadCount < NumThreads.Value Then
             LogMessage($"UI snappy mode enabled. Threads reduced to {threadCount}.")
+        End If
+
+        Dim context As StressPluginContext = _pluginRegistry.CreateContext(threadCount)
+        If String.Equals(selectedPluginId, DefaultPluginIds.Avx, StringComparison.OrdinalIgnoreCase) AndAlso Not context.AvxSupported Then
+            LogMessage("AVX selected but SIMD acceleration is not available. Falling back to Floating Point.")
+            selectedPluginId = DefaultPluginIds.FloatingPoint
+            SetSelectedStressPlugin(selectedPluginId)
+            _pluginRegistry.TryGetPlugin(selectedPluginId, selectedPlugin)
+        End If
+
+        If selectedPlugin Is Nothing Then
+            StopStressTest("No stress plugin available to start the run.")
+            Return
         End If
 
         Dim affinityCores As New List(Of Integer)()
@@ -2490,12 +2568,6 @@ Public Class frmMain
 
         For i = 0 To threadCount - 1
             Dim reportProgressAction As Action(Of Integer) = Sub(ops) Interlocked.Add(_operationsCompleted, ops)
-            Dim workloadType As StressTestType = selectedTestType
-            If selectedTestType = StressTestType.Mixed Then
-                workloadType = SelectMixedWorkload(i, avxAvailable)
-            ElseIf selectedTestType = StressTestType.Blend Then
-                workloadType = SelectBlendWorkload(i, avxAvailable)
-            End If
 
             Dim coreIndex As Integer? = Nothing
             If useAffinity Then
@@ -2504,8 +2576,8 @@ Public Class frmMain
 
             Dim indexSeed As ULong = CULng(i)
             Dim workerSeed As ULong = baseSeed Xor (indexSeed << 1) Xor (indexSeed << 33) Xor (indexSeed << 47)
-            Dim worker As IStressWorker = _stressTester.CreateWorker(workloadType, i, workerSeed)
-            Dim kernelName As String = If(worker IsNot Nothing, worker.KernelName, workloadType.ToString())
+            Dim worker As IStressWorker = selectedPlugin.CreateWorker(i, workerSeed, context)
+            Dim kernelName As String = If(worker IsNot Nothing, worker.KernelName, selectedPlugin.DisplayName)
 
             Dim threadStart As Threading.ThreadStart = Sub()
                                                            If coreIndex.HasValue Then
@@ -2590,12 +2662,8 @@ Public Class frmMain
 
             btnStart.Text = "Start"
             btnStart.Image = My.Resources.arrow_right_3
-            UpdateValidationStatusText()
+            ClearValidationStatus()
 
-            SyncLock _validationStatusLock
-                _validationStatusByWorker.Clear()
-            End SyncLock
-            UpdateValidationStatusLine(ValidationLogPrefix & "Off")
         Finally
             Interlocked.Exchange(_stopInProgress, 0)
         End Try
@@ -2727,14 +2795,21 @@ Public Class frmMain
         If reset Then
             _validationSettings.Reset()
         End If
-        UpdateValidationStatusText()
-    End Sub
+        ClearValidationStatus()
 
+        If _runOptions.ValidationMode <> ValidationMode.Off Then
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(Sub() ShowValidationMonitorWindow())
+            Else
+                ShowValidationMonitorWindow()
+            End If
+        End If
+    End Sub
     Private Sub StopValidation()
         If _validationSettings IsNot Nothing Then
             _validationSettings.Mode = ValidationMode.Off
         End If
-        UpdateValidationStatusText()
+        ClearValidationStatus()
     End Sub
 
     Private Sub TriggerAutoStop(reason As String)
@@ -2757,7 +2832,6 @@ Public Class frmMain
             .UiSnappyMode = source.UiSnappyMode,
             .TelemetryEnabled = source.TelemetryEnabled,
             .TelemetryIntervalMs = source.TelemetryIntervalMs,
-            .ShowAdvancedWorkloads = source.ShowAdvancedWorkloads,
             .ValidationEnabled = source.ValidationEnabled,
             .ValidationMode = source.ValidationMode,
             .ValidationIntervalMs = source.ValidationIntervalMs,
@@ -2790,11 +2864,13 @@ Public Class frmMain
 
     Private Class StressModeOption
         Public ReadOnly DisplayName As String
-        Public ReadOnly Value As StressTestType
+        Public ReadOnly Id As String
+        Public ReadOnly Plugin As IStressPlugin
 
-        Public Sub New(displayName As String, value As StressTestType)
+        Public Sub New(displayName As String, id As String, plugin As IStressPlugin)
             Me.DisplayName = displayName
-            Me.Value = value
+            Me.Id = id
+            Me.Plugin = plugin
         End Sub
 
         Public Overrides Function ToString() As String
@@ -2802,90 +2878,118 @@ Public Class frmMain
         End Function
     End Class
 
-    Private Shared Function IsAdvancedStressType(value As StressTestType) As Boolean
-        Select Case value
-            Case StressTestType.IntegerHeavy, StressTestType.MemoryBandwidth, StressTestType.Blend
+    Private Function TryResolveStressPluginId(value As String, ByRef resolvedId As String) As Boolean
+        resolvedId = Nothing
+        If String.IsNullOrWhiteSpace(value) Then
+            resolvedId = DefaultPluginIds.FloatingPoint
+            Return True
+        End If
+
+        Dim trimmed As String = value.Trim()
+        Dim plugin As IStressPlugin = Nothing
+        If _pluginRegistry IsNot Nothing AndAlso _pluginRegistry.TryGetPlugin(trimmed, plugin) Then
+            resolvedId = plugin.Id
+            Return True
+        End If
+
+        Select Case trimmed.ToLowerInvariant()
+            Case "floatingpoint", "floating point"
+                resolvedId = DefaultPluginIds.FloatingPoint
                 Return True
-            Case Else
-                Return False
+            Case "integerprimes", "integer primes", "integer (primes)"
+                resolvedId = DefaultPluginIds.IntegerPrimes
+                Return True
+            Case "avx", "avx (vector)", "vector"
+                resolvedId = DefaultPluginIds.Avx
+                Return True
+            Case "mixed"
+                resolvedId = DefaultPluginIds.Mixed
+                Return True
+            Case "blend"
+                resolvedId = DefaultPluginIds.Blend
+                Return True
+            Case "integerheavy", "integer heavy"
+                resolvedId = DefaultPluginIds.IntegerHeavy
+                Return True
+            Case "memorybandwidth", "memory bandwidth"
+                resolvedId = DefaultPluginIds.MemoryBandwidth
+                Return True
         End Select
+
+        If _pluginRegistry IsNot Nothing Then
+            For Each item As IStressPlugin In _pluginRegistry.GetPlugins()
+                If String.Equals(item.DisplayName, trimmed, StringComparison.OrdinalIgnoreCase) Then
+                    resolvedId = item.Id
+                    Return True
+                End If
+            Next
+        End If
+
+        Return False
     End Function
 
-    Private Shared Function GetStressModeLabel(value As StressTestType) As String
-        Select Case value
-            Case StressTestType.FloatingPoint
-                Return "Floating Point"
-            Case StressTestType.IntegerPrimes
-                Return "Integer (Primes)"
-            Case StressTestType.AVX
-                Return "AVX (Vector)"
-            Case StressTestType.Mixed
-                Return "Mixed"
-            Case StressTestType.Blend
-                Return "Blend"
-            Case StressTestType.IntegerHeavy
-                Return "Integer Heavy"
-            Case StressTestType.MemoryBandwidth
-                Return "Memory Bandwidth"
-            Case Else
-                Return value.ToString()
-        End Select
+    Private Function ResolveStressPluginId(value As String) As String
+        Dim resolved As String = Nothing
+        If TryResolveStressPluginId(value, resolved) Then
+            Return resolved
+        End If
+        Return DefaultPluginIds.FloatingPoint
     End Function
 
-    Private Function GetSelectedStressType() As StressTestType
+    Private Function GetStressModeLabel(value As String) As String
+        Dim plugin As IStressPlugin = Nothing
+        Dim resolved As String = ResolveStressPluginId(value)
+        If _pluginRegistry IsNot Nothing AndAlso _pluginRegistry.TryGetPlugin(resolved, plugin) Then
+            Return plugin.DisplayName
+        End If
+        If Not String.IsNullOrWhiteSpace(value) Then
+            Return value
+        End If
+        Return "Unknown"
+    End Function
+
+    Private Function GetSelectedStressPluginId() As String
         Dim selectedOption As StressModeOption = TryCast(cmbStressType.SelectedItem, StressModeOption)
-        If selectedOption IsNot Nothing Then
-            Return selectedOption.Value
+        If selectedOption IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(selectedOption.Id) Then
+            Return selectedOption.Id
         End If
 
-        Dim parsed As StressTestType
-        If cmbStressType.SelectedItem IsNot Nothing AndAlso [Enum].TryParse(cmbStressType.SelectedItem.ToString(), parsed) Then
-            Return parsed
-        End If
-
-        Return StressTestType.FloatingPoint
+        Dim raw As String = If(cmbStressType.SelectedItem?.ToString(), String.Empty)
+        Return ResolveStressPluginId(raw)
     End Function
 
-    Private Sub SetSelectedStressType(value As StressTestType)
-        If _runOptions IsNot Nothing AndAlso IsAdvancedStressType(value) Then
-            _runOptions.ShowAdvancedWorkloads = True
-        End If
+    Private Sub SetSelectedStressPlugin(value As String)
         UpdateStressModeList(value)
     End Sub
 
-    Private Sub UpdateStressModeList(Optional selectedType As Nullable(Of StressTestType) = Nothing)
+    Private Sub UpdateStressModeList(Optional selectedId As String = Nothing)
         If cmbStressType Is Nothing Then
             Return
         End If
 
-        Dim current As StressTestType = If(selectedType.HasValue, selectedType.Value, GetSelectedStressType())
-        Dim showAdvanced As Boolean = _runOptions IsNot Nothing AndAlso _runOptions.ShowAdvancedWorkloads
+        Dim currentId As String = ResolveStressPluginId(If(selectedId, GetSelectedStressPluginId()))
 
-        Dim options As New List(Of StressModeOption) From {
-            New StressModeOption(GetStressModeLabel(StressTestType.FloatingPoint), StressTestType.FloatingPoint),
-            New StressModeOption(GetStressModeLabel(StressTestType.IntegerPrimes), StressTestType.IntegerPrimes),
-            New StressModeOption(GetStressModeLabel(StressTestType.AVX), StressTestType.AVX),
-            New StressModeOption(GetStressModeLabel(StressTestType.Mixed), StressTestType.Mixed)
-        }
-
-        Dim advancedTypes As StressTestType() = {StressTestType.Blend, StressTestType.IntegerHeavy, StressTestType.MemoryBandwidth}
-        If showAdvanced Then
-            For Each value As StressTestType In advancedTypes
-                options.Add(New StressModeOption(GetStressModeLabel(value) & " (Advanced)", value))
+        Dim options As New List(Of StressModeOption)()
+        If _pluginRegistry IsNot Nothing Then
+            Dim ordered = _pluginRegistry.GetPlugins().OrderBy(Function(p) p.SortOrder).ThenBy(Function(p) p.DisplayName)
+            For Each plugin As IStressPlugin In ordered
+                options.Add(New StressModeOption(plugin.DisplayName, plugin.Id, plugin))
             Next
-        ElseIf IsAdvancedStressType(current) Then
-            options.Add(New StressModeOption(GetStressModeLabel(current) & " (Advanced)", current))
         End If
 
+        cmbStressType.DataSource = Nothing
         cmbStressType.DataSource = options
-        Dim selection As StressModeOption = options.FirstOrDefault(Function(o) o.Value = current)
+
+        Dim selection As StressModeOption = options.FirstOrDefault(Function(o) String.Equals(o.Id, currentId, StringComparison.OrdinalIgnoreCase))
         If selection IsNot Nothing Then
             cmbStressType.SelectedItem = selection
+        ElseIf options.Count > 0 Then
+            cmbStressType.SelectedIndex = 0
         End If
     End Sub
 
     Private Function BuildProfileFromUi() As ProfileData
-        Dim stressName As String = GetSelectedStressType().ToString()
+        Dim stressName As String = GetSelectedStressPluginId()
 
         Dim profile As New ProfileData() With {
             .Threads = CInt(NumThreads.Value),
@@ -2912,11 +3016,13 @@ Public Class frmMain
             End If
             NumThreads.Value = threadValue
 
-            Dim parsedType As StressTestType
-            If Not String.IsNullOrWhiteSpace(profile.StressType) AndAlso [Enum].TryParse(profile.StressType, parsedType) Then
-                SetSelectedStressType(parsedType)
+            Dim resolvedId As String = Nothing
+            If TryResolveStressPluginId(profile.StressType, resolvedId) Then
+                SetSelectedStressPlugin(resolvedId)
+            ElseIf Not String.IsNullOrWhiteSpace(profile.StressType) Then
+                LogMessage($"Profile workload '{profile.StressType}' is unavailable. Using Floating Point.")
+                SetSelectedStressPlugin(DefaultPluginIds.FloatingPoint)
             End If
-
             If Not String.IsNullOrWhiteSpace(profile.ThreadPriority) Then
                 CmbThreadPriority.Text = profile.ThreadPriority
             End If
@@ -2976,14 +3082,14 @@ Public Class frmMain
             End If
         End If
 
-        UpdateStressModeList(GetSelectedStressType())
-        UpdateValidationStatusText()
+        UpdateStressModeList(GetSelectedStressPluginId())
+        UpdateValidationDisplay()
     End Sub
 
-    Private Function CreateProfile(threads As Integer, stressType As StressTestType, priority As String, saveLog As Boolean, options As RunOptions, plotWindowSeconds As Single) As ProfileData
+    Private Function CreateProfile(threads As Integer, stressTypeId As String, priority As String, saveLog As Boolean, options As RunOptions, plotWindowSeconds As Single) As ProfileData
         Dim profile As New ProfileData() With {
             .Threads = Math.Max(1, threads),
-            .StressType = stressType.ToString(),
+            .StressType = stressTypeId,
             .ThreadPriority = priority,
             .SaveLogOnExit = saveLog,
             .RunOptions = options,
@@ -3003,16 +3109,16 @@ Public Class frmMain
         Dim profiles As New Dictionary(Of String, ProfileData)(StringComparer.OrdinalIgnoreCase)
         Dim threads As Integer = Environment.ProcessorCount
 
-        profiles(DefaultProfileName) = CreateProfile(threads, StressTestType.FloatingPoint, "Normal", False, New RunOptions(), 120)
+        profiles(DefaultProfileName) = CreateProfile(threads, DefaultPluginIds.FloatingPoint, "Normal", False, New RunOptions(), 120)
 
-        profiles("OC Quick Thermal") = CreateProfile(threads, StressTestType.FloatingPoint, "Above Normal", False, New RunOptions() With {
+        profiles("OC Quick Thermal") = CreateProfile(threads, DefaultPluginIds.FloatingPoint, "Above Normal", False, New RunOptions() With {
             .TimedRunMinutes = 10,
             .AutoStopTempC = 90,
             .UiSnappyMode = True,
             .AutoShowTempPlot = True
         }, 120)
 
-        profiles("OC Sustained Heat") = CreateProfile(threads, StressTestType.Mixed, "Normal", False, New RunOptions() With {
+        profiles("OC Sustained Heat") = CreateProfile(threads, DefaultPluginIds.Mixed, "Normal", False, New RunOptions() With {
             .TimedRunMinutes = 60,
             .AutoStopTempC = 95,
             .UiSnappyMode = True,
@@ -3022,7 +3128,7 @@ Public Class frmMain
             .AutoShowTempPlot = True
         }, 300)
 
-        profiles("OC AVX Torture") = CreateProfile(threads, StressTestType.AVX, "Highest", False, New RunOptions() With {
+        profiles("OC AVX Torture") = CreateProfile(threads, DefaultPluginIds.Avx, "Highest", False, New RunOptions() With {
             .TimedRunMinutes = 30,
             .AutoStopTempC = 90,
             .UiSnappyMode = True,
@@ -3031,7 +3137,7 @@ Public Class frmMain
             .AutoShowTempPlot = True
         }, 180)
 
-        profiles("OC Mixed Stress") = CreateProfile(threads, StressTestType.Mixed, "Above Normal", False, New RunOptions() With {
+        profiles("OC Mixed Stress") = CreateProfile(threads, DefaultPluginIds.Mixed, "Above Normal", False, New RunOptions() With {
             .TimedRunMinutes = 20,
             .AutoStopTempC = 92,
             .UiSnappyMode = True,
@@ -3040,7 +3146,7 @@ Public Class frmMain
             .AutoShowTempPlot = True
         }, 180)
 
-        profiles("OC Integer Stability") = CreateProfile(threads, StressTestType.IntegerPrimes, "Above Normal", False, New RunOptions() With {
+        profiles("OC Integer Stability") = CreateProfile(threads, DefaultPluginIds.IntegerPrimes, "Above Normal", False, New RunOptions() With {
             .TimedRunMinutes = 120,
             .AutoStopTempC = 85,
             .UiSnappyMode = True,
@@ -3310,11 +3416,6 @@ Public Class frmMain
                                                            End Sub
             row += rowHeight
 
-            Dim chkAdvancedWorkloads As New CheckBox() With {.Text = "Show advanced workloads", .AutoSize = True, .Location = New Point(leftLabel, row)}
-            tip.SetToolTip(chkAdvancedWorkloads, "Show extra workloads like Blend or Memory Bandwidth.")
-            chkAdvancedWorkloads.Checked = working.ShowAdvancedWorkloads
-            row += rowHeight
-
             Dim chkAutoPlot As New CheckBox() With {.Text = "Auto-show temp plot on start", .AutoSize = True, .Location = New Point(leftLabel, row)}
             tip.SetToolTip(chkAutoPlot, "Open the temperature plot automatically when starting.")
             chkAutoPlot.Checked = working.AutoShowTempPlot
@@ -3352,7 +3453,7 @@ Public Class frmMain
             dlg.AcceptButton = btnOk
             dlg.CancelButton = btnCancel
 
-            dlg.Controls.AddRange(New Control() {chkTimed, numTimed, chkTemp, numTemp, chkThrottle, chkUiSnappy, chkTelemetry, numTelemetry, lblValidation, cmbValidation, lblValidationInterval, numValidationInterval, chkAdvancedWorkloads, chkAutoPlot, chkAffinity, btnAffinity, lblAffinity, btnOk, btnCancel})
+            dlg.Controls.AddRange(New Control() {chkTimed, numTimed, chkTemp, numTemp, chkThrottle, chkUiSnappy, chkTelemetry, numTelemetry, lblValidation, cmbValidation, lblValidationInterval, numValidationInterval, chkAutoPlot, chkAffinity, btnAffinity, lblAffinity, btnOk, btnCancel})
 
             If dlg.ShowDialog(Me) <> DialogResult.OK Then
                 Return Nothing
@@ -3369,7 +3470,6 @@ Public Class frmMain
             [Enum].TryParse(validationSelection, parsedMode)
             working.ValidationMode = parsedMode
             working.ValidationIntervalMs = CInt(numValidationInterval.Value)
-            working.ShowAdvancedWorkloads = chkAdvancedWorkloads.Checked
             working.AutoShowTempPlot = chkAutoPlot.Checked
             working.UseAffinity = chkAffinity.Checked AndAlso selectedCores.Count > 0
             working.AffinityCores = If(working.UseAffinity, selectedCores, New List(Of Integer)())
@@ -3447,7 +3547,41 @@ Public Class frmMain
 
         LogMessage("Run options updated.")
     End Sub
+    Private Sub PluginManagerToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles PluginManagerToolStripMenuItem.Click
+        Using dlg As New frmPluginManager()
+            dlg.ShowDialog(Me)
 
+            If dlg.HasChanges Then
+                Dim pluginSettings As PluginSettings = PluginSettingsStore.LoadSettings()
+                Dim disabledIds As New HashSet(Of String)(pluginSettings.DisabledPluginIds, StringComparer.OrdinalIgnoreCase)
+                _pluginRegistry.LoadPlugins(AddressOf LogMessage, disabledIds)
+                UpdateStressModeList(GetSelectedStressPluginId())
+            End If
+
+            If dlg.RequiresRestart Then
+                MessageBox.Show(Me, "Plugins were staged. Restart ClawHammer to apply changes.", "Plugin Manager", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            End If
+        End Using
+    End Sub
+
+    Private Sub ShowValidationMonitorWindow()
+        If _validationMonitor Is Nothing OrElse _validationMonitor.IsDisposed Then
+            _validationMonitor = New frmValidationMonitor()
+            If _uiLayout Is Nothing Then
+                _uiLayout = UiLayoutManager.LoadLayout()
+            End If
+            UiLayoutManager.ApplyWindowLayout(_validationMonitor, _uiLayout.ValidationMonitorWindow)
+            AddHandler _validationMonitor.FormClosing, Sub() SaveValidationMonitorLayout()
+            AddHandler _validationMonitor.FormClosed, Sub()
+                                                          _validationMonitor = Nothing
+                                                      End Sub
+            _validationMonitor.Show(Me)
+            UpdateValidationDisplay()
+        Else
+            _validationMonitor.BringToFront()
+            _validationMonitor.Focus()
+        End If
+    End Sub
     Private Sub ShowTemperaturePlotWindow()
         If _tempPlotForm Is Nothing OrElse _tempPlotForm.IsDisposed Then
             _tempPlotForm = New TempPlotForm()
@@ -3457,6 +3591,7 @@ Public Class frmMain
             _tempPlotForm.ApplyLayout(_uiLayout.TempPlotWindow)
             _tempPlotForm.TimeWindowSeconds = _plotTimeWindowSeconds
             _tempPlotForm.ApplySensorSelection(_uiLayout.TempPlotSelectedSensors, _uiLayout.TempPlotSelectionSet)
+            _tempPlotForm.RefreshIntervalMs = _uiLayout.TempPlotRefreshIntervalMs
             AddHandler _tempPlotForm.TimeWindowChanged, AddressOf TempPlotForm_TimeWindowChanged
             AddHandler _tempPlotForm.FormClosing, Sub() SaveTempPlotLayout()
             AddHandler _tempPlotForm.FormClosed, Sub()
@@ -3475,6 +3610,9 @@ Public Class frmMain
         SaveCurrentProfile()
     End Sub
 
+    Private Sub ValidationMonitorToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles ValidationMonitorToolStripMenuItem.Click
+        ShowValidationMonitorWindow()
+    End Sub
     Private Sub TemperaturePlotToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles TemperaturePlotToolStripMenuItem.Click
         ShowTemperaturePlotWindow()
     End Sub
@@ -3843,6 +3981,35 @@ Public Class frmMain
     End Sub
 
 End Class
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

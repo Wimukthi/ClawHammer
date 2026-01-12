@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Grey Element Software",
+  "classifications": [ "ClawHammer", "Stress Test", "Plugin" ],
+  "identity": "ClawHammer.PluginTemplate.CSharp",
+  "name": "ClawHammer Plugin (C#)",
+  "shortName": "clawhammer-plugin-cs",
+  "sourceName": "ClawHammer.PluginTemplate",
+  "preferNameDirectory": true,
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "symbols": {
+    "PluginId": {
+      "type": "parameter",
+      "defaultValue": "com.example.sample",
+      "replaces": "com.example.sample"
+    },
+    "PluginDisplayName": {
+      "type": "parameter",
+      "defaultValue": "Sample Plugin",
+      "replaces": "Sample Plugin"
+    },
+    "PluginDescription": {
+      "type": "parameter",
+      "defaultValue": "Demonstrates a minimal ClawHammer stress plugin.",
+      "replaces": "Demonstrates a minimal ClawHammer stress plugin."
+    },
+    "PluginCategory": {
+      "type": "parameter",
+      "defaultValue": "Sample",
+      "replaces": "Sample"
+    }
+  }
+}

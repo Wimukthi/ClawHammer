@@ -1,4 +1,4 @@
-Imports System.Collections.Generic
+﻿Imports System.Collections.Generic
 Imports System.Drawing
 Imports System.Windows.Forms
 
@@ -12,6 +12,7 @@ Friend Class TempPlotForm
     Private ReadOnly _sensorColors As Dictionary(Of String, Color)
     Private ReadOnly _persistedSelection As HashSet(Of String)
     Private ReadOnly _timeWindowBox As NumericUpDown
+    Private ReadOnly _refreshBox As NumericUpDown
     Private ReadOnly _refreshTimer As Timer
     Private ReadOnly _split As SplitContainer
     Private ReadOnly _toolTip As ToolTip
@@ -23,7 +24,9 @@ Friend Class TempPlotForm
     Private _pendingSplitterDistance As Integer = -1
     Private ReadOnly _palette As UiThemePalette
     Private ReadOnly _plotPalette As PlotPalette
-
+    Private Const DefaultRefreshIntervalMs As Integer = 200
+    Private Const MinRefreshIntervalMs As Integer = 50
+    Private Const MaxRefreshIntervalMs As Integer = 2000
     Private Shared ReadOnly Palette As Color() = {
         Color.FromArgb(231, 76, 60),
         Color.FromArgb(52, 152, 219),
@@ -142,6 +145,17 @@ Friend Class TempPlotForm
         plotToolbar.Controls.Add(lblWindow)
         plotToolbar.Controls.Add(_timeWindowBox)
 
+        Dim lblRefresh As New Label() With {.Text = "Refresh (ms)", .AutoSize = True, .ForeColor = _palette.Text, .Margin = New Padding(0, 4, 8, 0)}
+        _refreshBox = New NumericUpDown() With {.Minimum = MinRefreshIntervalMs, .Maximum = MaxRefreshIntervalMs, .Increment = 50, .Value = DefaultRefreshIntervalMs, .Width = 80, .BackColor = _palette.Surface, .ForeColor = _palette.Text, .Margin = New Padding(0, 0, 8, 0)}
+        _toolTip.SetToolTip(lblRefresh, "How often the plot refreshes.")
+        _toolTip.SetToolTip(_refreshBox, "Lower values update faster; higher values reduce CPU usage.")
+        AddHandler _refreshBox.ValueChanged, Sub()
+                                                 If _refreshTimer IsNot Nothing Then
+                                                     _refreshTimer.Interval = CInt(_refreshBox.Value)
+                                                 End If
+                                             End Sub
+        plotToolbar.Controls.Add(lblRefresh)
+        plotToolbar.Controls.Add(_refreshBox)
         _split.Panel2.Controls.Add(_plot)
         _split.Panel2.Controls.Add(plotToolbar)
         _toolTip.SetToolTip(_plot, "Live temperature plot for the selected sensors.")
@@ -152,7 +166,7 @@ Friend Class TempPlotForm
         AddHandler _sensorList.DrawItem, AddressOf SensorList_DrawItem
 
         _refreshTimer = New Timer()
-        _refreshTimer.Interval = 200
+        _refreshTimer.Interval = CInt(_refreshBox.Value)
         AddHandler _refreshTimer.Tick, Sub()
                                            If Threading.Interlocked.Exchange(_plotDirty, 0) = 1 Then
                                                _plot.Invalidate()
@@ -201,6 +215,20 @@ Friend Class TempPlotForm
             _timeWindowBox.Value = clamped
             _plot.TimeWindowSeconds = CSng(_timeWindowBox.Value)
             _suppressTimeWindowEvent = False
+        End Set
+    End Property
+    <System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden),
+     System.ComponentModel.Browsable(False)>
+    Public Property RefreshIntervalMs As Integer
+        Get
+            Return CInt(_refreshBox.Value)
+        End Get
+        Set(value As Integer)
+            Dim clamped As Decimal = Math.Max(_refreshBox.Minimum, Math.Min(_refreshBox.Maximum, CDec(value)))
+            _refreshBox.Value = clamped
+            If _refreshTimer IsNot Nothing Then
+                _refreshTimer.Interval = CInt(_refreshBox.Value)
+            End If
         End Set
     End Property
 
@@ -416,3 +444,7 @@ Friend Class TempPlotForm
         Return label.IndexOf(" CPU", StringComparison.OrdinalIgnoreCase) >= 0
     End Function
 End Class
+
+
+
+
