@@ -11,11 +11,14 @@ Public Class UiWindowLayout
     Public Property WindowState As FormWindowState = FormWindowState.Normal
     Public Property SplitterDistance As Integer = -1
     Public Property ColumnWidths As List(Of Integer) = New List(Of Integer)()
+    Public Property Dpi As Integer = 96
 End Class
 
 Public Class UiLayoutStore
     Public Property MainWindow As UiWindowLayout = New UiWindowLayout()
     Public Property TempPlotWindow As UiWindowLayout = New UiWindowLayout()
+    Public Property TempPlotSelectedSensors As List(Of String) = New List(Of String)()
+    Public Property TempPlotSelectionSet As Boolean = False
 End Class
 
 Public Module UiLayoutManager
@@ -78,6 +81,9 @@ Public Module UiLayoutManager
             If layout.TempPlotWindow Is Nothing Then
                 layout.TempPlotWindow = New UiWindowLayout()
             End If
+            If layout.TempPlotSelectedSensors Is Nothing Then
+                layout.TempPlotSelectedSensors = New List(Of String)()
+            End If
             Return layout
         Catch
             Return Nothing
@@ -105,6 +111,7 @@ Public Module UiLayoutManager
         layout.Width = bounds.Width
         layout.Height = bounds.Height
         layout.WindowState = state
+        layout.Dpi = GetTargetDpi(target)
     End Sub
 
     Public Sub ApplyWindowLayout(target As Form, layout As UiWindowLayout)
@@ -116,7 +123,12 @@ Public Module UiLayoutManager
             Return
         End If
 
-        Dim desired As New Rectangle(layout.X, layout.Y, layout.Width, layout.Height)
+        Dim scale As Single = GetLayoutScaleFactor(target, layout)
+        Dim desired As New Rectangle(
+            ScaleLayoutValue(layout.X, scale),
+            ScaleLayoutValue(layout.Y, scale),
+            ScaleLayoutValue(layout.Width, scale),
+            ScaleLayoutValue(layout.Height, scale))
         Dim adjusted As Rectangle = EnsureVisibleBounds(desired)
 
         target.StartPosition = FormStartPosition.Manual
@@ -128,6 +140,34 @@ Public Module UiLayoutManager
             target.WindowState = FormWindowState.Normal
         End If
     End Sub
+
+    Friend Function GetLayoutScaleFactor(target As Control, layout As UiWindowLayout) As Single
+        Dim savedDpi As Integer = If(layout IsNot Nothing AndAlso layout.Dpi > 0, layout.Dpi, 96)
+        Dim currentDpi As Integer = If(target IsNot Nothing, GetTargetDpi(target), savedDpi)
+        If savedDpi <= 0 OrElse currentDpi <= 0 Then
+            Return 1.0F
+        End If
+        Return CSng(currentDpi) / CSng(savedDpi)
+    End Function
+
+    Friend Function ScaleLayoutValue(value As Integer, scale As Single) As Integer
+        If scale <= 0 Then
+            Return value
+        End If
+        Return CInt(Math.Round(value * scale))
+    End Function
+
+    Private Function GetTargetDpi(target As Control) As Integer
+        If target Is Nothing Then
+            Return 96
+        End If
+
+        Dim dpi As Integer = target.DeviceDpi
+        If dpi <= 0 Then
+            dpi = 96
+        End If
+        Return dpi
+    End Function
 
     Public Sub ApplySplitterDistanceSafe(split As SplitContainer, distance As Integer)
         If split Is Nothing Then

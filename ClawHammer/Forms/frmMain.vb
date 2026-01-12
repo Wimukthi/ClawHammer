@@ -8,27 +8,9 @@ Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Drawing
 Imports System.IO
-Imports System.Net.Http
 Imports System.Text.Json
 Imports System.Threading.Tasks
 Imports System.Linq
-' ----------------------------------------------------------------------------------------
-' Author:                    Wimukthi Bandara
-' Company:                   Grey Element Software
-' Assembly version:          1.2.0.160
-' ----------------------------------------------------------------------------------------
-' This program is free software: you can redistribute it and/or modify
-' it under the terms of the GNU General Public License as published by
-' the Free Software Foundation, either version 3 of the License, or
-' any later version.
-' This program is distributed in the hope that it will be useful,
-' but WITHOUT ANY WARRANTY; without even the implied warranty of
-' MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-' GNU General Public License for more details.
-' You should have received a copy of the GNU General Public License
-' along with this program.  If not, see http://www.gnu.org/licenses/.
-' ----------------------------------------------------------------------------------------
-
 
 
 Public Class frmMain
@@ -81,8 +63,8 @@ Public Class frmMain
     Private _lastCpuUsage As Integer = 0
     Private _lastThroughput As Double = 0
     Private _stopInProgress As Integer = 0
-    Private _validationCts As Threading.CancellationTokenSource
-    Private _validationThread As Threading.Thread
+    Private _validationSettings As ValidationSettings
+    Private _validationStatusText As String = "Validation: Off"
     Private Const CpuPollIntervalMs As Integer = 200
     Private Const UiSnappyCpuPollIntervalMs As Integer = 750
     Private _tempPlotForm As TempPlotForm
@@ -93,6 +75,8 @@ Public Class frmMain
     Private _uiLayoutApplied As Boolean = False
     Private _pendingMainSplitterDistance As Integer = -1
     Private Const SensorIconFolderName As String = "icons"
+    Private Const PawnIoSetupFileName As String = "PawnIO_setup.exe"
+    Private Shared ReadOnly PawnIoMinVersion As Version = New Version(2, 0, 0, 0)
     Private Const IconCpu As String = "cpu"
     Private Const IconGpu As String = "gpu"
     Private Const IconMotherboard As String = "motherboard"
@@ -100,6 +84,10 @@ Public Class frmMain
     Private Const IconStorage As String = "storage"
     Private Const IconController As String = "controller"
     Private Const IconDefault As String = "temp"
+    Private Const IconTemperature As String = "temperature"
+    Private Const IconVoltage As String = "voltage"
+    Private Const IconClock As String = "clock"
+    Private Const IconThrottle As String = "throttle"
     Private Const DefaultProfileName As String = "Default"
     Private Shared ReadOnly BuiltInProfileOrder As String() = {
         DefaultProfileName,
@@ -117,6 +105,27 @@ Public Class frmMain
     Private _plotTimeWindowSeconds As Single = 120.0F
     Private _cpuVendor As CpuVendor = CpuVendor.Unknown
     Private _cpuVendorResolved As Boolean = False
+    Private _throttlePeakClockMHz As Single = Single.NaN
+    Private _throttleLoadedSamples As Integer = 0
+    Private _throttleLowClockSamples As Integer = 0
+    Private _throttleLastActive As Boolean = False
+    Private _throttleLastDetail As String = String.Empty
+    Private Const ThrottleMinCpuUsagePercent As Integer = 85
+    Private Const ThrottleDropRatio As Single = 0.85F
+    Private Const ThrottleSevereDropRatio As Single = 0.75F
+    Private Const ThrottleMinLoadedSamples As Integer = 5
+    Private Const ThrottleMinLowSamplesHot As Integer = 3
+    Private Const ThrottleMinLowSamplesSevere As Integer = 5
+    Private _treeListExpanded As Dictionary(Of String, Boolean) = New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+    Private _lastSensorReadings As List(Of SensorReading) = New List(Of SensorReading)()
+    Private _lastAvgText As String = "CPU Temp: N/A"
+    Private _sensorMinMax As Dictionary(Of String, SensorMinMax) = New Dictionary(Of String, SensorMinMax)(StringComparer.OrdinalIgnoreCase)
+    Private _uiLayoutMissing As Boolean = False
+    Private ReadOnly _validationStatusByWorker As New Dictionary(Of Integer, String)()
+    Private ReadOnly _validationStatusLock As New Object()
+    Private Const ValidationLogPrefix As String = "Validation Status: "
+    Private _toolTipMain As ToolTip
+    Private _sensorAccessWarningLogged As Integer = 0
 
 
     Public Shared Sub SetDoubleBuffered(ByVal control As Control)
@@ -127,17 +136,133 @@ Public Class frmMain
         Return value.ToString("F1") & CelsiusSuffix
     End Function
 
+    Private Shared Function FormatCelsiusOrNa(value As Single) As String
+        If Single.IsNaN(value) Then
+            Return "N/A"
+        End If
+        Return FormatCelsius(value)
+    End Function
+
+    Private Shared Function FormatClockMHzOrNa(value As Single) As String
+        If Single.IsNaN(value) Then
+            Return "N/A"
+        End If
+        Return value.ToString("F0", CultureInfo.InvariantCulture) & " MHz"
+    End Function
+
+    Private Shared Function FormatVoltageOrNa(value As Single) As String
+        If Single.IsNaN(value) Then
+            Return "N/A"
+        End If
+        Return value.ToString("F3", CultureInfo.InvariantCulture) & " V"
+    End Function
+
+    Private Enum SensorValueFormat
+        None
+        Celsius
+        Mhz
+        Volt
+        Percent
+        Watt
+        Number
+    End Enum
+
     Private Structure SensorReading
         Public ReadOnly Label As String
         Public ReadOnly ValueText As String
         Public ReadOnly IconKey As String
+        Public ReadOnly ValueRaw As Nullable(Of Single)
+        Public ReadOnly ValueFormat As SensorValueFormat
 
-        Public Sub New(label As String, valueText As String, iconKey As String)
+        Public Sub New(label As String, valueText As String, iconKey As String, Optional valueRaw As Nullable(Of Single) = Nothing, Optional valueFormat As SensorValueFormat = SensorValueFormat.None)
             Me.Label = label
             Me.ValueText = valueText
             Me.IconKey = iconKey
+            Me.ValueRaw = valueRaw
+            Me.ValueFormat = valueFormat
         End Sub
     End Structure
+
+    Private Structure SensorMinMax
+        Public Min As Single
+        Public Max As Single
+        Public Format As SensorValueFormat
+
+        Public Sub New(value As Single, format As SensorValueFormat)
+            Min = value
+            Max = value
+            Me.Format = format
+        End Sub
+    End Structure
+
+    Private Shared Function FormatSensorValue(value As Single, format As SensorValueFormat) As String
+        Select Case format
+            Case SensorValueFormat.Celsius
+                Return FormatCelsius(value)
+            Case SensorValueFormat.Mhz
+                Return value.ToString("F0", CultureInfo.InvariantCulture) & " MHz"
+            Case SensorValueFormat.Volt
+                Return value.ToString("F3", CultureInfo.InvariantCulture) & " V"
+            Case SensorValueFormat.Percent
+                Return value.ToString("F0", CultureInfo.InvariantCulture) & "%"
+            Case SensorValueFormat.Watt
+                Return value.ToString("F1", CultureInfo.InvariantCulture) & " W"
+            Case SensorValueFormat.Number
+                Return value.ToString("F2", CultureInfo.InvariantCulture)
+            Case Else
+                Return value.ToString("F2", CultureInfo.InvariantCulture)
+        End Select
+    End Function
+
+    Private Shared Function CreateSensorReading(label As String, iconKey As String, valueRaw As Nullable(Of Single), format As SensorValueFormat) As SensorReading
+        Dim valueText As String = If(valueRaw.HasValue, FormatSensorValue(valueRaw.Value, format), "N/A")
+        Return New SensorReading(label, valueText, iconKey, valueRaw, format)
+    End Function
+
+    Private Sub UpdateSensorMinMax(reading As SensorReading)
+        If String.IsNullOrWhiteSpace(reading.Label) Then
+            Return
+        End If
+        If Not reading.ValueRaw.HasValue Then
+            Return
+        End If
+        If reading.ValueFormat = SensorValueFormat.None Then
+            Return
+        End If
+
+        Dim value As Single = reading.ValueRaw.Value
+        If Single.IsNaN(value) OrElse Single.IsInfinity(value) Then
+            Return
+        End If
+        Dim existing As SensorMinMax
+        If _sensorMinMax.TryGetValue(reading.Label, existing) Then
+            existing.Min = Math.Min(existing.Min, value)
+            existing.Max = Math.Max(existing.Max, value)
+            If existing.Format = SensorValueFormat.None Then
+                existing.Format = reading.ValueFormat
+            End If
+            _sensorMinMax(reading.Label) = existing
+        Else
+            _sensorMinMax(reading.Label) = New SensorMinMax(value, reading.ValueFormat)
+        End If
+    End Sub
+
+    Private Sub GetSensorMinMaxText(reading As SensorReading, ByRef minText As String, ByRef maxText As String)
+        minText = String.Empty
+        maxText = String.Empty
+        If reading.ValueFormat = SensorValueFormat.None Then
+            Return
+        End If
+
+        Dim existing As SensorMinMax
+        If Not _sensorMinMax.TryGetValue(reading.Label, existing) Then
+            Return
+        End If
+
+        Dim format As SensorValueFormat = If(existing.Format <> SensorValueFormat.None, existing.Format, reading.ValueFormat)
+        minText = FormatSensorValue(existing.Min, format)
+        maxText = FormatSensorValue(existing.Max, format)
+    End Sub
 
     Private Enum CpuVendor
         Unknown
@@ -157,6 +282,12 @@ Public Class frmMain
         DieAverage
         Socket
         Other
+    End Enum
+
+    Private Enum ThrottleMatchKind
+        None
+        Trigger
+        Info
     End Enum
 
     Private Structure CpuTempReading
@@ -209,9 +340,11 @@ Public Class frmMain
             Return
         End If
 
+        Dim dpiScale As Single = Math.Max(1.0F, CSng(DeviceDpi) / 96.0F)
+        Dim iconSize As Integer = Math.Max(16, CInt(Math.Round(16 * dpiScale)))
         Dim imageList As New ImageList() With {
             .ColorDepth = ColorDepth.Depth32Bit,
-            .ImageSize = New Size(16, 16)
+            .ImageSize = New Size(iconSize, iconSize)
         }
 
         Dim iconFiles As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
@@ -221,7 +354,11 @@ Public Class frmMain
             {IconMemory, "memory.png"},
             {IconStorage, "storage.png"},
             {IconController, "controller.png"},
-            {IconDefault, "temp.png"}
+            {IconDefault, "temperature.png"},
+            {IconTemperature, "temperature.png"},
+            {IconVoltage, "voltage.png"},
+            {IconClock, "clocks.png"},
+            {IconThrottle, "thorttle.png"}
         }
 
         For Each entry In iconFiles
@@ -298,6 +435,7 @@ Public Class frmMain
         If _uiLayout Is Nothing Then
             _uiLayout = New UiLayoutStore()
         End If
+        _uiLayoutMissing = Not File.Exists(UiLayoutManager.GetLayoutPath())
 
         ApplyWindowLayoutIfAvailable()
         ApplyMainListLayout(_uiLayout.MainWindow)
@@ -325,17 +463,18 @@ Public Class frmMain
             Return
         End If
 
+        Dim scale As Single = UiLayoutManager.GetLayoutScaleFactor(Me, layout)
         If lstvCoreTemps IsNot Nothing AndAlso layout.ColumnWidths IsNot Nothing AndAlso layout.ColumnWidths.Count > 0 Then
             Dim count As Integer = Math.Min(layout.ColumnWidths.Count, lstvCoreTemps.Columns.Count)
             For i As Integer = 0 To count - 1
-                Dim width As Integer = layout.ColumnWidths(i)
+                Dim width As Integer = UiLayoutManager.ScaleLayoutValue(layout.ColumnWidths(i), scale)
                 If width > 30 Then
                     lstvCoreTemps.Columns(i).Width = width
                 End If
             Next
         End If
 
-        _pendingMainSplitterDistance = layout.SplitterDistance
+        _pendingMainSplitterDistance = UiLayoutManager.ScaleLayoutValue(layout.SplitterDistance, scale)
     End Sub
 
     Private Sub ApplyPendingMainSplitter()
@@ -372,6 +511,9 @@ Public Class frmMain
 
         If _tempPlotForm IsNot Nothing AndAlso Not _tempPlotForm.IsDisposed Then
             _tempPlotForm.CaptureLayout(_uiLayout.TempPlotWindow)
+            Dim selectionSet As Boolean = _tempPlotForm.SelectionSet
+            _uiLayout.TempPlotSelectionSet = selectionSet
+            _uiLayout.TempPlotSelectedSensors = If(selectionSet, _tempPlotForm.GetSelectedSensors(), New List(Of String)())
         End If
 
         UiLayoutManager.SaveLayout(_uiLayout)
@@ -387,6 +529,9 @@ Public Class frmMain
         End If
 
         _tempPlotForm.CaptureLayout(_uiLayout.TempPlotWindow)
+        Dim selectionSet As Boolean = _tempPlotForm.SelectionSet
+        _uiLayout.TempPlotSelectionSet = selectionSet
+        _uiLayout.TempPlotSelectedSensors = If(selectionSet, _tempPlotForm.GetSelectedSensors(), New List(Of String)())
         UiLayoutManager.SaveLayout(_uiLayout)
     End Sub
 
@@ -464,27 +609,30 @@ Public Class frmMain
             Return
         End If
 
+        Dim topIndex As Integer = -1
+        Dim topLabel As String = String.Empty
+        If lstvCoreTemps.TopItem IsNot Nothing Then
+            topIndex = lstvCoreTemps.TopItem.Index
+            topLabel = lstvCoreTemps.TopItem.Text
+        End If
+
+        _lastSensorReadings = If(readings IsNot Nothing, New List(Of SensorReading)(readings), New List(Of SensorReading)())
+        _lastAvgText = avgText
+        For Each reading As SensorReading In _lastSensorReadings
+            UpdateSensorMinMax(reading)
+        Next
+        Dim items As List(Of ListViewItem) = BuildTreeListItems(_lastSensorReadings)
+
         lstvCoreTemps.BeginUpdate()
         Try
-            If lstvCoreTemps.Items.Count <> readings.Count Then
-                lstvCoreTemps.Items.Clear()
-                For Each reading In readings
-                    Dim item As New ListViewItem(reading.Label)
-                    item.SubItems.Add(reading.ValueText)
-                    ApplyIconToItem(item, reading.IconKey)
-                    lstvCoreTemps.Items.Add(item)
-                Next
+            If lstvCoreTemps.Items.Count = items.Count AndAlso items.Count > 0 Then
+                UpdateTreeListItemsInPlace(items)
             Else
-                For i As Integer = 0 To readings.Count - 1
-                    Dim item As ListViewItem = lstvCoreTemps.Items(i)
-                    item.Text = readings(i).Label
-                    If item.SubItems.Count > 1 Then
-                        item.SubItems(1).Text = readings(i).ValueText
-                    Else
-                        item.SubItems.Add(readings(i).ValueText)
-                    End If
-                    ApplyIconToItem(item, readings(i).IconKey)
-                Next
+                lstvCoreTemps.Items.Clear()
+                If items.Count > 0 Then
+                    lstvCoreTemps.Items.AddRange(items.ToArray())
+                End If
+                RestoreTreeListScroll(topIndex, topLabel)
             End If
         Finally
             lstvCoreTemps.EndUpdate()
@@ -492,6 +640,317 @@ Public Class frmMain
 
         cputemp.Text = avgText
     End Sub
+
+    Private Sub UpdateTreeListItemsInPlace(items As List(Of ListViewItem))
+        If items Is Nothing OrElse items.Count = 0 Then
+            Return
+        End If
+
+        For i As Integer = 0 To items.Count - 1
+            Dim source As ListViewItem = items(i)
+            Dim target As ListViewItem = lstvCoreTemps.Items(i)
+            target.Text = source.Text
+            EnsureListViewSubItems(target, 4)
+            EnsureListViewSubItems(source, 4)
+            target.SubItems(1).Text = source.SubItems(1).Text
+            target.SubItems(2).Text = source.SubItems(2).Text
+            target.SubItems(3).Text = source.SubItems(3).Text
+            Dim sourceKey As String = source.ImageKey
+            If Not String.IsNullOrWhiteSpace(sourceKey) Then
+                target.ImageKey = sourceKey
+            ElseIf source.ImageIndex >= 0 Then
+                target.ImageIndex = source.ImageIndex
+            Else
+                target.ImageIndex = -1
+                target.ImageKey = String.Empty
+            End If
+            target.Tag = source.Tag
+        Next
+    End Sub
+
+    Private Shared Sub EnsureListViewSubItems(item As ListViewItem, count As Integer)
+        If item Is Nothing Then
+            Return
+        End If
+
+        While item.SubItems.Count < count
+            item.SubItems.Add(String.Empty)
+        End While
+    End Sub
+
+    Private Sub InitializeTreeListView()
+        If lstvCoreTemps Is Nothing Then
+            Return
+        End If
+
+        lstvCoreTemps.FullRowSelect = True
+        AddHandler lstvCoreTemps.MouseDown, AddressOf TreeList_MouseDown
+    End Sub
+
+    Private Sub TreeList_MouseDown(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Left Then
+            Return
+        End If
+
+        Dim listView As ListView = TryCast(sender, ListView)
+        If listView Is Nothing Then
+            Return
+        End If
+
+        Dim hit As ListViewHitTestInfo = listView.HitTest(e.Location)
+        If hit Is Nothing OrElse hit.Item Is Nothing OrElse hit.SubItem Is Nothing Then
+            Return
+        End If
+
+        Dim info As UiThemeManager.TreeListItemInfo = TryCast(hit.Item.Tag, UiThemeManager.TreeListItemInfo)
+        If info Is Nothing OrElse Not info.IsGroup Then
+            Return
+        End If
+
+        If hit.Item.SubItems.IndexOf(hit.SubItem) <> 0 Then
+            Return
+        End If
+
+        ToggleTreeListGroup(info.Key)
+    End Sub
+
+    Private Sub ToggleTreeListGroup(key As String)
+        If String.IsNullOrWhiteSpace(key) Then
+            Return
+        End If
+
+        Dim expanded As Boolean = True
+        If _treeListExpanded.TryGetValue(key, expanded) Then
+            _treeListExpanded(key) = Not expanded
+        Else
+            _treeListExpanded(key) = False
+        End If
+
+        If _lastSensorReadings IsNot Nothing Then
+            UpdateCoreTempUi(_lastSensorReadings, _lastAvgText)
+        End If
+    End Sub
+
+    Private Sub RestoreTreeListScroll(topIndex As Integer, topLabel As String)
+        If lstvCoreTemps Is Nothing OrElse lstvCoreTemps.Items.Count = 0 Then
+            Return
+        End If
+
+        If topIndex >= 0 AndAlso topIndex < lstvCoreTemps.Items.Count Then
+            Try
+                lstvCoreTemps.TopItem = lstvCoreTemps.Items(topIndex)
+                Return
+            Catch
+            End Try
+        End If
+
+        If String.IsNullOrWhiteSpace(topLabel) Then
+            Return
+        End If
+
+        For Each item As ListViewItem In lstvCoreTemps.Items
+            If String.Equals(item.Text, topLabel, StringComparison.OrdinalIgnoreCase) Then
+                Try
+                    lstvCoreTemps.TopItem = item
+                Catch
+                End Try
+                Exit For
+            End If
+        Next
+    End Sub
+
+    Private Function BuildTreeListItems(readings As List(Of SensorReading)) As List(Of ListViewItem)
+        Dim items As New List(Of ListViewItem)()
+        If readings Is Nothing OrElse readings.Count = 0 Then
+            Return items
+        End If
+
+        Dim cpuTemps As New List(Of SensorReading)()
+        Dim cpuClocks As New List(Of SensorReading)()
+        Dim cpuVoltages As New List(Of SensorReading)()
+        Dim cpuThrottle As New List(Of SensorReading)()
+        Dim otherGroups As New Dictionary(Of String, List(Of SensorReading))(StringComparer.OrdinalIgnoreCase)
+
+        For Each reading As SensorReading In readings
+            Dim label As String = If(reading.Label, String.Empty)
+            Dim labelLower As String = label.ToLowerInvariant()
+
+            If labelLower.StartsWith("cpu throttle") Then
+                cpuThrottle.Add(reading)
+            ElseIf labelLower.StartsWith("cpu clock") Then
+                cpuClocks.Add(reading)
+            ElseIf labelLower.StartsWith("cpu voltage") Then
+                cpuVoltages.Add(reading)
+            Else
+                Dim prefix As String = ExtractHardwarePrefix(label)
+                If prefix.Equals("Cpu", StringComparison.OrdinalIgnoreCase) Then
+                    cpuTemps.Add(reading)
+                Else
+                    Dim groupName As String = NormalizeHardwareGroupName(prefix)
+                    If String.IsNullOrWhiteSpace(groupName) Then
+                        groupName = "Other"
+                    End If
+                    Dim list As List(Of SensorReading) = Nothing
+                    If Not otherGroups.TryGetValue(groupName, list) Then
+                        list = New List(Of SensorReading)()
+                        otherGroups(groupName) = list
+                    End If
+                    list.Add(reading)
+                End If
+            End If
+        Next
+
+        Dim compare As Comparison(Of SensorReading) = Function(a, b) StringComparer.OrdinalIgnoreCase.Compare(a.Label, b.Label)
+        cpuTemps.Sort(compare)
+        cpuClocks.Sort(compare)
+        cpuVoltages.Sort(compare)
+        cpuThrottle.Sort(compare)
+
+        Dim cpuHasData As Boolean = (cpuTemps.Count + cpuClocks.Count + cpuVoltages.Count + cpuThrottle.Count) > 0
+        If cpuHasData Then
+            Dim cpuKey As String = "CPU"
+            Dim cpuExpanded As Boolean = GetTreeListExpanded(cpuKey, True)
+            items.Add(CreateTreeListItem("CPU", String.Empty, String.Empty, String.Empty, IconCpu, cpuKey, 0, True, cpuExpanded))
+
+            If cpuExpanded Then
+                AddTreeListSubgroup(items, "Temperatures", IconTemperature, cpuKey & "/Temperatures", cpuTemps, 1)
+                AddTreeListSubgroup(items, "Clocks", IconClock, cpuKey & "/Clocks", cpuClocks, 1)
+                AddTreeListSubgroup(items, "Voltages", IconVoltage, cpuKey & "/Voltages", cpuVoltages, 1)
+                AddTreeListSubgroup(items, "Throttle", IconThrottle, cpuKey & "/Throttle", cpuThrottle, 1)
+            End If
+        End If
+
+        Dim orderedGroups As IEnumerable(Of String) = otherGroups.Keys.OrderBy(Function(key) key, StringComparer.OrdinalIgnoreCase)
+        For Each groupName As String In orderedGroups
+            Dim groupKey As String = groupName
+            Dim expanded As Boolean = GetTreeListExpanded(groupKey, True)
+            items.Add(CreateTreeListItem(groupName, String.Empty, String.Empty, String.Empty, GetGroupIconKey(groupName), groupKey, 0, True, expanded))
+            If expanded Then
+                Dim list As List(Of SensorReading) = otherGroups(groupName)
+                list.Sort(compare)
+                For Each reading As SensorReading In list
+                    Dim minText As String = String.Empty
+                    Dim maxText As String = String.Empty
+                    GetSensorMinMaxText(reading, minText, maxText)
+                    items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, String.Empty, 1, False, False))
+                Next
+            End If
+        Next
+
+        If items.Count = 0 Then
+            items.Add(CreateTreeListItem("Sensors", "N/A", String.Empty, String.Empty, IconDefault, String.Empty, 0, False, False))
+        End If
+
+        Return items
+    End Function
+
+    Private Sub AddTreeListSubgroup(items As List(Of ListViewItem), label As String, iconKey As String, key As String, readings As List(Of SensorReading), level As Integer)
+        If readings Is Nothing OrElse readings.Count = 0 Then
+            Return
+        End If
+
+        Dim expanded As Boolean = GetTreeListExpanded(key, True)
+        items.Add(CreateTreeListItem(label, String.Empty, String.Empty, String.Empty, iconKey, key, level, True, expanded))
+
+        If Not expanded Then
+            Return
+        End If
+
+        For Each reading As SensorReading In readings
+            Dim minText As String = String.Empty
+            Dim maxText As String = String.Empty
+            GetSensorMinMaxText(reading, minText, maxText)
+            items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, String.Empty, level + 1, False, False))
+        Next
+    End Sub
+
+    Private Function CreateTreeListItem(label As String, valueText As String, minText As String, maxText As String, iconKey As String, key As String, level As Integer, isGroup As Boolean, isExpanded As Boolean) As ListViewItem
+        Dim item As New ListViewItem(label)
+        item.SubItems.Add(valueText)
+        item.SubItems.Add(minText)
+        item.SubItems.Add(maxText)
+        ApplyIconToItem(item, iconKey)
+        item.Tag = New UiThemeManager.TreeListItemInfo(key, level, isGroup, isExpanded)
+        Return item
+    End Function
+
+    Private Function GetTreeListExpanded(key As String, defaultExpanded As Boolean) As Boolean
+        If String.IsNullOrWhiteSpace(key) Then
+            Return defaultExpanded
+        End If
+
+        Dim expanded As Boolean
+        If _treeListExpanded.TryGetValue(key, expanded) Then
+            Return expanded
+        End If
+
+        _treeListExpanded(key) = defaultExpanded
+        Return defaultExpanded
+    End Function
+
+    Private Function ExtractHardwarePrefix(label As String) As String
+        If String.IsNullOrWhiteSpace(label) Then
+            Return String.Empty
+        End If
+
+        Dim index As Integer = label.IndexOf(":"c)
+        If index <= 0 Then
+            Return String.Empty
+        End If
+
+        Return label.Substring(0, index).Trim()
+    End Function
+
+    Private Function NormalizeHardwareGroupName(prefix As String) As String
+        If String.IsNullOrWhiteSpace(prefix) Then
+            Return String.Empty
+        End If
+
+        Dim lower As String = prefix.Trim().ToLowerInvariant()
+        If lower.StartsWith("gpu") Then
+            Return "GPU"
+        End If
+        If lower.StartsWith("cpu") Then
+            Return "CPU"
+        End If
+        If lower.StartsWith("motherboard") Then
+            Return "Motherboard"
+        End If
+        If lower.StartsWith("memory") Then
+            Return "Memory"
+        End If
+        If lower.StartsWith("storage") Then
+            Return "Storage"
+        End If
+        If lower.StartsWith("embeddedcontroller") OrElse lower.StartsWith("superio") OrElse lower.StartsWith("controller") Then
+            Return "Controller"
+        End If
+
+        Return Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(lower)
+    End Function
+
+    Private Function GetGroupIconKey(groupName As String) As String
+        If String.IsNullOrWhiteSpace(groupName) Then
+            Return IconDefault
+        End If
+
+        Select Case groupName.Trim().ToLowerInvariant()
+            Case "cpu"
+                Return IconCpu
+            Case "gpu"
+                Return IconGpu
+            Case "motherboard"
+                Return IconMotherboard
+            Case "memory"
+                Return IconMemory
+            Case "storage"
+                Return IconStorage
+            Case "controller"
+                Return IconController
+            Case Else
+                Return IconDefault
+        End Select
+    End Function
 
     Private Sub QueueCpuUsageUiUpdate(cpuUsageValue As Integer)
         If Me.IsDisposed OrElse Not Me.IsHandleCreated Then
@@ -523,7 +982,7 @@ Public Class frmMain
         End Try
     End Sub
 
-    ' CPU temperature polling callback.
+    ' CPU polling callback: collects sensor data, updates UI, and checks auto-stop conditions.
     Sub SubCPUDatTimer(ByVal sender As Object, ByVal e As ElapsedEventArgs)
         If Interlocked.Exchange(_cpuDataPollInProgress, 1) = 1 Then
             Return
@@ -536,6 +995,7 @@ Public Class frmMain
 
             Dim readings As New List(Of SensorReading)()
             Dim samples As List(Of TempSensorSample) = Nothing
+            Dim cpuCoreClocks As New List(Of Single)()
             Dim avgText As String = "CPU Temp: N/A"
             Dim autoStopThreshold As Single = _runOptions.AutoStopTempC
             Dim snapshotUtc As DateTime = DateTime.UtcNow
@@ -548,7 +1008,8 @@ Public Class frmMain
 
             If _computer IsNot Nothing Then
                 Dim cpuTemps As New List(Of CpuTempReading)()
-                CollectTemperatureReadings(readings, samples, cpuTemps, throttleIndicators)
+                CollectTemperatureReadings(readings, samples, cpuTemps, throttleIndicators, cpuCoreClocks)
+                LogSensorAccessWarningIfNeeded(readings, cpuCoreClocks)
 
                 Dim avgTemp As Single = Single.NaN
                 Dim maxTemp As Single = Single.NaN
@@ -565,6 +1026,24 @@ Public Class frmMain
             Else
                 _lastAvgTemp = Single.NaN
                 _lastMaxTemp = Single.NaN
+            End If
+
+            Dim avgCoreClock As Single = Single.NaN
+            Dim peakCoreClock As Single = Single.NaN
+            Dim dropPercent As Single = Single.NaN
+            Dim throttleDetail As String = String.Empty
+            Dim throttleActive As Boolean = False
+
+            If cpuCoreClocks.Count > 0 Then
+                avgCoreClock = ComputeAverage(cpuCoreClocks)
+                throttleActive = EvaluateHeuristicThrottle(avgCoreClock, _lastMaxTemp, _lastCpuUsage, throttleDetail)
+                peakCoreClock = _throttlePeakClockMHz
+                dropPercent = ComputeClockDropPercent(avgCoreClock, peakCoreClock)
+            End If
+
+            AppendThrottleHeuristicReadings(readings, avgCoreClock, peakCoreClock, dropPercent, _lastCpuUsage, _lastMaxTemp, throttleActive)
+            If shouldCheckThrottle AndAlso throttleIndicators IsNot Nothing AndAlso throttleActive AndAlso Not String.IsNullOrWhiteSpace(throttleDetail) Then
+                throttleIndicators.Add(throttleDetail)
             End If
 
             If readings.Count = 0 Then
@@ -672,6 +1151,10 @@ Public Class frmMain
     Private Sub frmMain_Shown(sender As Object, e As EventArgs) Handles Me.Shown
         ApplyWindowLayoutIfAvailable()
         ApplyPendingMainSplitter()
+        If _uiLayoutMissing Then
+            SaveUiLayout()
+            _uiLayoutMissing = False
+        End If
     End Sub
 
     Private Async Sub frmMain_Load(sender As System.Object, e As System.EventArgs) Handles MyBase.Load
@@ -686,14 +1169,27 @@ Public Class frmMain
             initForm.AddDetail("Launching ClawHammer.")
             Await Task.Yield()
 
-            If IsAdmin() = False Then
-                initForm.SetStatus("Checking privileges...")
-                initForm.AddDetail("Admin privileges not detected. Prompting for elevation.")
-                uacprompt.ShowDialog(Me)
+            initForm.SetStatus("Checking privileges...")
+            Dim isElevated As Boolean = IsAdmin()
+            If Not isElevated Then
+                If IsUserAdmin() Then
+                    initForm.AddDetail("Admin account detected. Restarting elevated.")
+                    If TryRestartElevated() Then
+                        Application.Exit()
+                        Return
+                    End If
+                    initForm.AddDetail("Elevation canceled. Continuing without admin privileges.")
+                    LogMessage("Elevation canceled; running with limited sensor access.")
+                Else
+                    initForm.AddDetail("Admin privileges not available. Continuing with limited sensor access.")
+                    LogMessage("Admin privileges not available; running with limited sensor access.")
+                End If
             Else
-                initForm.SetStatus("Checking privileges...")
                 initForm.AddDetail("Admin privileges detected.")
             End If
+            initForm.SetStatus("Checking hardware driver...")
+            initForm.AddDetail("Validating PawnIO installation.")
+            EnsurePawnIoInstalled(initForm)
             If lstvCoreTemps Is Nothing Then
                 System.Diagnostics.Debug.WriteLine("!!! ERROR: lstvCoreTemps is Nothing immediately before SetDoubleBuffered call in frmMain_Load !!!")
             End If
@@ -703,6 +1199,7 @@ Public Class frmMain
             SetDoubleBuffered(lstvCoreTemps)
             initForm.AddDetail("Loading sensor icons.")
             InitializeSensorIcons()
+            InitializeTreeListView()
             initForm.AddDetail("Restoring window layout.")
             ApplyPendingMainSplitter()
 
@@ -744,20 +1241,21 @@ Public Class frmMain
             initForm.AddDetail("Querying physical core count.")
             coreCount = Await Task.Run(Function() QueryPhysicalCoreCount())
 
-            Me.Text = "ClawHammer v" + My.Application.Info.Version.ToString + " - [Idle]"
+            Me.Text = "ClawHammer " & GetAppVersionDisplay() & " - [Idle]"
             NumThreads.Maximum = Environment.ProcessorCount
             NumThreads.Value = Environment.ProcessorCount
             CmbThreadPriority.Text = "Normal"
             lblProcessorCount.Text = Environment.ProcessorCount.ToString + " Hardware Threads"
             lblcores.Text = coreCount & " Physical Cores"
             cmbStressType.Items.Clear()
-            cmbStressType.DataSource = System.Enum.GetValues(GetType(StressTestType))
-            cmbStressType.SelectedItem = StressTestType.FloatingPoint
+            UpdateStressModeList(StressTestType.FloatingPoint)
 
             initForm.SetStatus("Loading profiles...")
             initForm.AddDetail("Loading saved profiles.")
             InitializeProfiles()
             initForm.AddDetail($"Active profile: {_currentProfileName}.")
+            UpdateValidationStatusText()
+            InitializeToolTips()
 
             LogMessage("ClawHammer Startup Successful")
             initForm.AddDetail("Starting system info snapshot (background).")
@@ -822,6 +1320,107 @@ Public Class frmMain
         End If
     End Sub
 
+    Private Sub HandleValidationStatusMessage(rawMessage As String)
+        If String.IsNullOrWhiteSpace(rawMessage) Then
+            Return
+        End If
+
+        Dim parts As String() = rawMessage.Split("|"c, 4)
+        If parts.Length = 4 AndAlso String.Equals(parts(0), "STATUS", StringComparison.OrdinalIgnoreCase) Then
+            Dim workerId As Integer
+            If Integer.TryParse(parts(1), workerId) Then
+                Dim kernel As String = parts(2)
+                Dim detail As String = parts(3)
+                Dim entry As String = $"W{workerId}:{kernel} {detail}"
+                Dim summary As String
+                SyncLock _validationStatusLock
+                    _validationStatusByWorker(workerId) = entry
+                    summary = String.Join(" | ", _validationStatusByWorker.OrderBy(Function(kvp) kvp.Key).Select(Function(kvp) kvp.Value))
+                End SyncLock
+                UpdateValidationStatusLine(ValidationLogPrefix & summary)
+                Return
+            End If
+        End If
+
+        LogMessage(rawMessage)
+    End Sub
+
+    Private Sub UpdateValidationStatusLine(text As String)
+        Dim updateAction As Action = Sub()
+                                         Dim lines As String() = rhtxtlog.Lines
+                                         Dim index As Integer = -1
+                                         For i As Integer = lines.Length - 1 To 0 Step -1
+                                             If lines(i).StartsWith(ValidationLogPrefix, StringComparison.OrdinalIgnoreCase) Then
+                                                 index = i
+                                                 Exit For
+                                             End If
+                                         Next
+
+                                         If index >= 0 Then
+                                             lines(index) = text
+                                         Else
+                                             Dim newLines As New List(Of String)(lines)
+                                             newLines.Add(text)
+                                             lines = newLines.ToArray()
+                                         End If
+
+                                         rhtxtlog.Lines = lines
+                                     End Sub
+
+        If rhtxtlog.InvokeRequired Then
+            rhtxtlog.BeginInvoke(updateAction)
+        Else
+            updateAction()
+        End If
+    End Sub
+
+    Private Sub InitializeToolTips()
+        If _toolTipMain Is Nothing Then
+            _toolTipMain = New ToolTip() With {
+                .AutoPopDelay = 12000,
+                .InitialDelay = 500,
+                .ReshowDelay = 150,
+                .ShowAlways = True
+            }
+        End If
+
+        Dim tip As ToolTip = _toolTipMain
+        tip.SetToolTip(grpClawHammer, "Configure workload, threads, and run settings.")
+        tip.SetToolTip(NumThreads, "Number of worker threads for the stress test." & vbCrLf & "Higher values use more CPU.")
+        tip.SetToolTip(CmbThreadPriority, "Windows priority for worker threads." & vbCrLf & "Higher can affect system responsiveness.")
+        tip.SetToolTip(cmbStressType, "Select the workload type to run." & vbCrLf & "Advanced modes can be shown in Run Options.")
+        tip.SetToolTip(cmbProfiles, "Saved profiles for quick setup." & vbCrLf & "Use Tools to save or load profiles.")
+        tip.SetToolTip(chkSaveLog, "Save the session log on exit." & vbCrLf & "Stored alongside the executable.")
+        tip.SetToolTip(btnStart, "Start or stop the stress test.")
+        tip.SetToolTip(lblThroughput, "Estimated operations per second from worker threads.")
+        tip.SetToolTip(rhtxtlog, "Live event log." & vbCrLf & "Validation status updates in place.")
+        tip.SetToolTip(lstvCoreTemps, "Sensor tree with current, min, and max readings.")
+
+        clawMenu.ShowItemToolTips = True
+        FileToolStripMenuItem.ToolTipText = "File actions."
+        ExitToolStripMenuItem.ToolTipText = "Exit the application."
+        ToolsToolStripMenuItem.ToolTipText = "Run options and utilities."
+        RunOptionsToolStripMenuItem.ToolTipText = "Configure run behavior, validation, telemetry, and advanced modes."
+        TemperaturePlotToolStripMenuItem.ToolTipText = "Open the live temperature plot window."
+        CoreAffinityToolStripMenuItem.ToolTipText = "Choose CPU cores for worker threads."
+        SaveProfileToolStripMenuItem.ToolTipText = "Save current settings to a profile."
+        LoadProfileToolStripMenuItem.ToolTipText = "Load a saved profile."
+        SystemInfoToolStripMenuItem.ToolTipText = "Log system info to the output window."
+        ExportReportToolStripMenuItem.ToolTipText = "Export run settings and log to an HTML report."
+        HelpToolStripMenuItem.ToolTipText = "Help, updates, and about."
+        CheckForUpdatesToolStripMenuItem.ToolTipText = "Check GitHub for new ClawHammer releases."
+        AboutToolStripMenuItem.ToolTipText = "View version and license information."
+
+        StStatus.ShowItemToolTips = True
+        lblcores.ToolTipText = "Detected physical CPU cores."
+        lblProcessorCount.ToolTipText = "Detected logical hardware threads."
+        LblActiveThreads.ToolTipText = "Active stress worker threads."
+        cputemp.ToolTipText = "Average CPU temperature summary."
+        lblusage.ToolTipText = "Current CPU usage."
+        lblValidation.ToolTipText = "Validation mode and error count."
+        progCPUUsage.ToolTipText = "CPU usage meter."
+    End Sub
+
     ' Thread-safe title bar update.
     Private Sub SetTitleBarText(status As String)
         Dim effectiveStatus As String = status
@@ -837,10 +1436,10 @@ Public Class frmMain
         If _runOptions.AutoStopOnThrottle Then extras.Add("Throttle-stop")
         If _runOptions.UseAffinity AndAlso _runOptions.AffinityCores IsNot Nothing AndAlso _runOptions.AffinityCores.Count > 0 Then extras.Add("Affinity")
         If _runOptions.TelemetryEnabled Then extras.Add("CSV Log")
-        If _runOptions.ValidationEnabled Then extras.Add("Validation")
+        If _runOptions.ValidationMode <> ValidationMode.Off Then extras.Add($"Validation:{_runOptions.ValidationMode}")
 
         Dim extraText As String = If(extras.Count > 0, " [" & String.Join(", ", extras) & "]", String.Empty)
-        Dim title As String = $"ClawHammer v{My.Application.Info.Version} - {effectiveStatus}{extraText}"
+        Dim title As String = $"ClawHammer {GetAppVersionDisplay()} - {effectiveStatus}{extraText}"
         If Me.InvokeRequired Then
             Me.BeginInvoke(Sub() Me.Text = title)
         Else
@@ -859,23 +1458,244 @@ Public Class frmMain
         End If
     End Sub
 
-    Private Sub CollectTemperatureReadings(readings As List(Of SensorReading), samples As List(Of TempSensorSample), cpuTemps As List(Of CpuTempReading), throttleIndicators As List(Of String))
+    Private Sub UpdateValidationStatusText()
+        Dim mode As ValidationMode = ValidationMode.Off
+        Dim errors As Integer = 0
+        Dim isRunning As Boolean = btnStart IsNot Nothing AndAlso btnStart.Text = "Stop"
+        If isRunning AndAlso _validationSettings IsNot Nothing Then
+            mode = _validationSettings.Mode
+            errors = _validationSettings.ErrorCount
+        Else
+            mode = _runOptions.ValidationMode
+        End If
+
+        If mode = ValidationMode.Off Then
+            _validationStatusText = "Validation: Off"
+        ElseIf errors > 0 Then
+            _validationStatusText = $"Validation: {mode} (Errors: {errors})"
+        Else
+            _validationStatusText = $"Validation: {mode}"
+        End If
+
+        If lblValidation Is Nothing Then
+            Return
+        End If
+
+        Dim parent As Control = lblValidation.GetCurrentParent()
+        If parent IsNot Nothing AndAlso parent.InvokeRequired Then
+            parent.BeginInvoke(Sub() lblValidation.Text = _validationStatusText)
+        Else
+            lblValidation.Text = _validationStatusText
+        End If
+    End Sub
+
+    ' Walk the hardware tree and gather temperature + supporting sensor data.
+    Private Sub CollectTemperatureReadings(readings As List(Of SensorReading), samples As List(Of TempSensorSample), cpuTemps As List(Of CpuTempReading), throttleIndicators As List(Of String), cpuCoreClocks As List(Of Single))
         For Each hw As IHardware In _computer.Hardware
-            AddHardwareTemperatureReadings(hw, readings, samples, cpuTemps, throttleIndicators, hw.HardwareType = HardwareType.Cpu, Nothing)
+            AddHardwareTemperatureReadings(hw, readings, samples, cpuTemps, throttleIndicators, cpuCoreClocks, hw.HardwareType = HardwareType.Cpu, Nothing)
         Next
     End Sub
 
-    Private Sub AddHardwareTemperatureReadings(hw As IHardware, readings As List(Of SensorReading), samples As List(Of TempSensorSample), cpuTemps As List(Of CpuTempReading), throttleIndicators As List(Of String), isCpuBranch As Boolean, parentLabel As String)
+
+    Private Sub LogSensorAccessWarningIfNeeded(readings As List(Of SensorReading), cpuCoreClocks As List(Of Single))
+        If readings Is Nothing OrElse readings.Count = 0 Then
+            Return
+        End If
+
+        If Interlocked.CompareExchange(_sensorAccessWarningLogged, 0, 0) <> 0 Then
+            Return
+        End If
+
+        Dim hasClockSensors As Boolean = readings.Any(Function(reading) reading.Label IsNot Nothing AndAlso reading.Label.StartsWith("CPU Clock", StringComparison.OrdinalIgnoreCase))
+        Dim hasVoltageSensors As Boolean = readings.Any(Function(reading) reading.Label IsNot Nothing AndAlso reading.Label.StartsWith("CPU Voltage", StringComparison.OrdinalIgnoreCase))
+        Dim hasClockValues As Boolean = cpuCoreClocks IsNot Nothing AndAlso cpuCoreClocks.Count > 0
+        Dim hasVoltageValues As Boolean = readings.Any(Function(reading) reading.Label IsNot Nothing AndAlso reading.Label.StartsWith("CPU Voltage", StringComparison.OrdinalIgnoreCase) AndAlso reading.ValueRaw.HasValue)
+
+        If (hasClockSensors AndAlso Not hasClockValues) OrElse (hasVoltageSensors AndAlso Not hasVoltageValues) Then
+            If Interlocked.Exchange(_sensorAccessWarningLogged, 1) = 1 Then
+                Return
+            End If
+
+            LogMessage("Hardware access warning: some CPU sensors are unavailable (N/A).")
+            For Each line As String In GetHardwareMonitorStatusLines()
+                LogMessage(line)
+            Next
+        End If
+    End Sub
+
+    Private Function GetHardwareMonitorStatusLines() As List(Of String)
+        Dim lines As New List(Of String)()
+        lines.Add($"LibreHardwareMonitor: {GetLibreHardwareMonitorVersionText()}")
+        lines.Add($"Process elevated: {If(IsAdmin(), "Yes", "No")}")
+
+        Try
+            Dim installed As Boolean = LibreHardwareMonitor.PawnIo.PawnIo.IsInstalled
+            Dim version As Version = LibreHardwareMonitor.PawnIo.PawnIo.Version
+
+            lines.Add($"PawnIO installed: {installed}")
+            If installed AndAlso version IsNot Nothing Then
+                lines.Add($"PawnIO version: {version}")
+            ElseIf Not installed Then
+                lines.Add("Note: PawnIO not installed; some sensors may read N/A.")
+            End If
+        Catch ex As Exception
+            lines.Add("PawnIO status unavailable: " & ex.Message)
+        End Try
+
+        Return lines
+    End Function
+
+    Private Function GetLibreHardwareMonitorVersionText() As String
+        Try
+            Dim version As Version = GetType(Computer).Assembly.GetName().Version
+            If version IsNot Nothing Then
+                Return version.ToString()
+            End If
+        Catch
+        End Try
+
+        Return "Unknown"
+    End Function
+
+    Private Sub EnsurePawnIoInstalled(initForm As frmInit)
+        Dim installed As Boolean = False
+        Dim version As Version = Nothing
+
+        Try
+            installed = LibreHardwareMonitor.PawnIo.PawnIo.IsInstalled
+            version = LibreHardwareMonitor.PawnIo.PawnIo.Version
+        Catch ex As Exception
+            LogMessage("PawnIO check failed: " & ex.Message)
+            Return
+        End Try
+
+        If installed AndAlso version IsNot Nothing AndAlso version < PawnIoMinVersion Then
+            initForm?.AddDetail($"PawnIO {version} detected; update required.")
+            If Not PromptPawnIoInstall($"PawnIO is outdated (found {version}). Install update now?") Then
+                LogMessage("PawnIO update skipped; some sensors may be unavailable.")
+                Return
+            End If
+            RunPawnIoInstaller(initForm)
+        ElseIf Not installed Then
+            initForm?.AddDetail("PawnIO not installed.")
+            If Not PromptPawnIoInstall("PawnIO is not installed. Install it now?") Then
+                LogMessage("PawnIO not installed; some sensors may be unavailable.")
+                Return
+            End If
+            RunPawnIoInstaller(initForm)
+        End If
+    End Sub
+
+    Private Function PromptPawnIoInstall(message As String) As Boolean
+        Dim detail As String = message & vbCrLf & vbCrLf &
+            "ClawHammer uses the open-source PawnIO driver to access hardware sensors (CPU clocks, voltages, and temps)." & vbCrLf &
+            "It runs in kernel mode like other sensor drivers."
+        Dim result As DialogResult = MessageBox.Show(Me, detail, "ClawHammer", MessageBoxButtons.OKCancel, MessageBoxIcon.Information)
+        Return result = DialogResult.OK
+    End Function
+
+    Private Sub RunPawnIoInstaller(initForm As frmInit)
+        If Not IsAdmin() Then
+            LogMessage("PawnIO install requires administrator privileges.")
+            initForm?.AddDetail("PawnIO install requires administrator privileges.")
+            MessageBox.Show(Me, "Installing PawnIO requires administrator privileges. Please restart ClawHammer as administrator.", "ClawHammer", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End If
+
+        Dim installerPath As String = ExtractPawnIoSetup()
+        If String.IsNullOrWhiteSpace(installerPath) Then
+            LogMessage("PawnIO installer not found.")
+            initForm?.AddDetail("PawnIO installer not found.")
+            Return
+        End If
+
+        Try
+            initForm?.AddDetail("Running PawnIO installer.")
+            Dim psi As New ProcessStartInfo(installerPath, "-install") With {
+                .UseShellExecute = True,
+                .Verb = "runas"
+            }
+            Dim proc As Process = Process.Start(psi)
+            If proc IsNot Nothing Then
+                proc.WaitForExit()
+                proc.Dispose()
+            End If
+            initForm?.AddDetail("PawnIO installer finished.")
+        Catch ex As Exception
+            LogMessage("PawnIO install failed: " & ex.Message)
+        Finally
+            Try
+                File.Delete(installerPath)
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    Private Function ExtractPawnIoSetup() As String
+        Dim tempPath As String = Path.Combine(Path.GetTempPath(), PawnIoSetupFileName)
+        Try
+            If File.Exists(tempPath) Then
+                File.Delete(tempPath)
+            End If
+        Catch
+        End Try
+
+        Dim localPath As String = Path.Combine(AppContext.BaseDirectory, PawnIoSetupFileName)
+        If File.Exists(localPath) Then
+            Try
+                File.Copy(localPath, tempPath, True)
+                Return tempPath
+            Catch
+            End Try
+        End If
+
+        Dim asm As Assembly = GetType(frmMain).Assembly
+        Dim resourceName As String = FindPawnIoResourceName(asm)
+        If String.IsNullOrWhiteSpace(resourceName) Then
+            Return Nothing
+        End If
+
+        Try
+            Using stream As Stream = asm.GetManifestResourceStream(resourceName)
+                If stream Is Nothing Then
+                    Return Nothing
+                End If
+
+                Using fileStream As New FileStream(tempPath, FileMode.Create, FileAccess.Write)
+                    stream.CopyTo(fileStream)
+                End Using
+            End Using
+
+            Return tempPath
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Function FindPawnIoResourceName(asm As Assembly) As String
+        If asm Is Nothing Then
+            Return Nothing
+        End If
+
+        For Each name As String In asm.GetManifestResourceNames()
+            If name.EndsWith(PawnIoSetupFileName, StringComparison.OrdinalIgnoreCase) Then
+                Return name
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
+    ' Flatten hardware sensors into display rows while tracking CPU branches for extra metrics.
+    Private Sub AddHardwareTemperatureReadings(hw As IHardware, readings As List(Of SensorReading), samples As List(Of TempSensorSample), cpuTemps As List(Of CpuTempReading), throttleIndicators As List(Of String), cpuCoreClocks As List(Of Single), isCpuBranch As Boolean, parentLabel As String)
         hw.Update()
         Dim baseLabel As String = BuildHardwareLabel(hw, parentLabel)
         Dim iconKey As String = GetSensorIconKey(hw.HardwareType, isCpuBranch)
 
         For Each sensor As ISensor In hw.Sensors
-            If isCpuBranch AndAlso throttleIndicators IsNot Nothing Then
-                Dim throttleName As String = EvaluateThrottleSensor(sensor)
-                If Not String.IsNullOrWhiteSpace(throttleName) Then
-                    throttleIndicators.Add(throttleName)
-                End If
+            If isCpuBranch Then
+                ProcessThrottleSensor(sensor, readings, throttleIndicators, iconKey)
+                ProcessCpuClockVoltageSensor(sensor, readings, cpuCoreClocks, iconKey)
             End If
 
             If sensor.SensorType <> SensorType.Temperature Then
@@ -884,30 +1704,26 @@ Public Class frmMain
 
             Dim label As String = $"{baseLabel} - {sensor.Name}"
             Dim hasValue As Boolean = sensor.Value.HasValue
-            Dim valueText As String
             Dim sampleValue As Single = 0
 
             If hasValue Then
                 sampleValue = sensor.Value.Value
-                valueText = FormatCelsius(sampleValue)
                 If isCpuBranch AndAlso cpuTemps IsNot Nothing Then
                     Dim kind As CpuTempKind = ClassifyCpuTempSensor(sensor.Name)
                     If kind <> CpuTempKind.Excluded Then
                         cpuTemps.Add(New CpuTempReading(sensor.Name, sampleValue, kind))
                     End If
                 End If
-            Else
-                valueText = "N/A"
             End If
 
-            readings.Add(New SensorReading(label, valueText, iconKey))
+            readings.Add(CreateSensorReading(label, IconTemperature, If(hasValue, CType(sampleValue, Nullable(Of Single)), Nothing), SensorValueFormat.Celsius))
             If samples IsNot Nothing Then
                 samples.Add(New TempSensorSample(label, sampleValue, hasValue))
             End If
         Next
 
         For Each subHardware As IHardware In hw.SubHardware
-            AddHardwareTemperatureReadings(subHardware, readings, samples, cpuTemps, throttleIndicators, isCpuBranch OrElse hw.HardwareType = HardwareType.Cpu, baseLabel)
+            AddHardwareTemperatureReadings(subHardware, readings, samples, cpuTemps, throttleIndicators, cpuCoreClocks, isCpuBranch OrElse hw.HardwareType = HardwareType.Cpu, baseLabel)
         Next
     End Sub
 
@@ -1171,75 +1987,286 @@ Public Class frmMain
         Return False
     End Function
 
-    Private Function EvaluateThrottleSensor(sensor As ISensor) As String
+    ' Extract throttle-related sensor values and emit diagnostics.
+    Private Sub ProcessThrottleSensor(sensor As ISensor, readings As List(Of SensorReading), throttleIndicators As List(Of String), iconKey As String)
         If sensor Is Nothing Then
-            Return Nothing
+            Return
         End If
 
         Dim name As String = sensor.Name
         If String.IsNullOrWhiteSpace(name) Then
-            Return Nothing
+            Return
         End If
 
         Dim nameLower As String = name.Trim().ToLowerInvariant()
-        If Not IsThrottleSensorName(nameLower) Then
-            Return Nothing
+        Dim matchKind As ThrottleMatchKind = GetThrottleMatchKind(nameLower, sensor.SensorType)
+        If matchKind = ThrottleMatchKind.None Then
+            Return
         End If
 
-        If Not sensor.Value.HasValue Then
-            Return Nothing
+        If readings IsNot Nothing Then
+            Dim valueRaw As Nullable(Of Single) = Nothing
+            Dim valueFormat As SensorValueFormat = SensorValueFormat.None
+            Dim valueText As String = GetThrottleValueInfo(sensor, valueRaw, valueFormat)
+            readings.Add(New SensorReading($"CPU Throttle - {name}", valueText, IconThrottle, valueRaw, valueFormat))
+        End If
+
+        If matchKind = ThrottleMatchKind.Trigger AndAlso throttleIndicators IsNot Nothing AndAlso sensor.Value.HasValue Then
+            Dim value As Single = sensor.Value.Value
+            If IsThrottleActive(sensor.SensorType, value, nameLower) Then
+                throttleIndicators.Add(name)
+            End If
+        End If
+    End Sub
+
+    ' Capture per-core clock and voltage readings for display and heuristics.
+    Private Sub ProcessCpuClockVoltageSensor(sensor As ISensor, readings As List(Of SensorReading), cpuCoreClocks As List(Of Single), iconKey As String)
+        If sensor Is Nothing Then
+            Return
+        End If
+
+        Dim name As String = sensor.Name
+        If String.IsNullOrWhiteSpace(name) Then
+            Return
+        End If
+
+        Dim nameLower As String = name.Trim().ToLowerInvariant()
+
+        Select Case sensor.SensorType
+            Case SensorType.Clock
+                If Not IsCpuCoreClockSensor(nameLower) Then
+                    Return
+                End If
+
+                Dim valueRaw As Nullable(Of Single) = Nothing
+                Dim valueText As String = "N/A"
+                If sensor.Value.HasValue Then
+                    Dim value As Single = sensor.Value.Value
+                    valueText = FormatSensorValue(value, SensorValueFormat.Mhz)
+                    If value > 0 Then
+                        cpuCoreClocks?.Add(value)
+                        valueRaw = value
+                    End If
+                End If
+
+                readings?.Add(New SensorReading($"CPU Clock - {name}", valueText, IconClock, valueRaw, SensorValueFormat.Mhz))
+
+            Case SensorType.Voltage
+                If Not IsCpuCoreVoltageSensor(nameLower) Then
+                    Return
+                End If
+
+                Dim valueRaw As Nullable(Of Single) = Nothing
+                Dim valueText As String = "N/A"
+                If sensor.Value.HasValue Then
+                    Dim value As Single = sensor.Value.Value
+                    valueText = FormatSensorValue(value, SensorValueFormat.Volt)
+                    valueRaw = value
+                End If
+
+                readings?.Add(New SensorReading($"CPU Voltage - {name}", valueText, IconVoltage, valueRaw, SensorValueFormat.Volt))
+        End Select
+    End Sub
+
+    Private Function FormatThrottleValue(sensor As ISensor) As String
+        Dim raw As Nullable(Of Single) = Nothing
+        Dim format As SensorValueFormat = SensorValueFormat.None
+        Return GetThrottleValueInfo(sensor, raw, format)
+    End Function
+
+    Private Function GetThrottleValueInfo(sensor As ISensor, ByRef valueRaw As Nullable(Of Single), ByRef valueFormat As SensorValueFormat) As String
+        valueRaw = Nothing
+        valueFormat = SensorValueFormat.None
+        If sensor Is Nothing OrElse Not sensor.Value.HasValue Then
+            Return "N/A"
         End If
 
         Dim value As Single = sensor.Value.Value
-        If IsThrottleActive(sensor.SensorType, value, nameLower) Then
-            Return name
-        End If
-
-        Return Nothing
+        Select Case sensor.SensorType
+            Case SensorType.Control
+                Return If(value > 0.5F, "Active", "Inactive")
+            Case SensorType.Level, SensorType.Load, SensorType.Factor
+                Dim percent As Single = If(value <= 1.0F, value * 100.0F, value)
+                valueRaw = percent
+                valueFormat = SensorValueFormat.Percent
+                Return percent.ToString("F0", CultureInfo.InvariantCulture) & "%"
+            Case SensorType.Power
+                valueRaw = value
+                valueFormat = SensorValueFormat.Watt
+                Return value.ToString("F1", CultureInfo.InvariantCulture) & " W"
+            Case SensorType.Clock
+                valueRaw = value
+                valueFormat = SensorValueFormat.Mhz
+                Return value.ToString("F0", CultureInfo.InvariantCulture) & " MHz"
+            Case SensorType.Voltage
+                valueRaw = value
+                valueFormat = SensorValueFormat.Volt
+                Return value.ToString("F3", CultureInfo.InvariantCulture) & " V"
+            Case SensorType.Temperature
+                valueRaw = value
+                valueFormat = SensorValueFormat.Celsius
+                Return FormatCelsius(value)
+            Case Else
+                valueRaw = value
+                valueFormat = SensorValueFormat.Number
+                Return value.ToString("F2", CultureInfo.InvariantCulture)
+        End Select
     End Function
 
-    Private Function IsThrottleSensorName(nameLower As String) As Boolean
-        If nameLower.Contains("throttl") Then
-            Return True
+    Private Function GetThrottleMatchKind(nameLower As String, sensorType As SensorType) As ThrottleMatchKind
+        If String.IsNullOrWhiteSpace(nameLower) Then
+            Return ThrottleMatchKind.None
         End If
-        If nameLower.Contains("prochot") Then
-            Return True
+
+        If nameLower.Contains("throttl") OrElse nameLower.Contains("prochot") OrElse nameLower.Contains("limit exceeded") OrElse nameLower.Contains("exceeded") Then
+            Return ThrottleMatchKind.Trigger
         End If
-        If nameLower.Contains("power limit exceeded") OrElse nameLower.Contains("current limit exceeded") OrElse nameLower.Contains("thermal limit exceeded") Then
-            Return True
+
+        If nameLower.Contains("thermal limit") Then
+            Return If(IsThrottleBooleanType(sensorType), ThrottleMatchKind.Trigger, ThrottleMatchKind.Info)
         End If
-        If nameLower.Contains("limit exceeded") Then
-            Return True
+
+        If nameLower.Contains("power limit") OrElse nameLower.Contains("current limit") OrElse nameLower.Contains("edp") OrElse nameLower.Contains("ppt") OrElse nameLower.Contains("tdc") OrElse nameLower.Contains("edc") OrElse nameLower.Contains("pl1") OrElse nameLower.Contains("pl2") Then
+            Return ThrottleMatchKind.Info
         End If
-        If nameLower.Contains("power limit") OrElse nameLower.Contains("current limit") OrElse nameLower.Contains("thermal limit") Then
-            Return True
-        End If
-        If nameLower.Contains("edp") Then
-            Return True
-        End If
-        If nameLower.Contains("ppt") OrElse nameLower.Contains("tdc") OrElse nameLower.Contains("edc") Then
-            Return True
-        End If
-        Return False
+
+        Return ThrottleMatchKind.None
     End Function
 
     Private Function IsThrottleActive(sensorType As SensorType, value As Single, nameLower As String) As Boolean
         Select Case sensorType
-            Case SensorType.Control
-                Return value >= 1.0F
-            Case SensorType.Level, SensorType.Load, SensorType.Factor
-                Return value >= 99.0F
+            Case SensorType.Control, SensorType.Level, SensorType.Load, SensorType.Factor
+                Return value > 0.5F
             Case Else
                 If IsThrottleBooleanName(nameLower) Then
-                    Return value >= 1.0F
+                    Return value > 0.5F
                 End If
         End Select
         Return False
     End Function
 
+    Private Function IsThrottleBooleanType(sensorType As SensorType) As Boolean
+        Return sensorType = SensorType.Control OrElse sensorType = SensorType.Level OrElse sensorType = SensorType.Load OrElse sensorType = SensorType.Factor
+    End Function
+
     Private Function IsThrottleBooleanName(nameLower As String) As Boolean
         Return nameLower.Contains("throttl") OrElse nameLower.Contains("exceed") OrElse nameLower.Contains("prochot")
     End Function
+
+    Private Function IsCpuCoreClockSensor(nameLower As String) As Boolean
+        If String.IsNullOrWhiteSpace(nameLower) Then
+            Return False
+        End If
+        If nameLower.Contains("bus") OrElse nameLower.Contains("bclk") OrElse nameLower.Contains("uncore") OrElse nameLower.Contains("ring") OrElse nameLower.Contains("cache") Then
+            Return False
+        End If
+        Return IsCoreReadingName(nameLower)
+    End Function
+
+    Private Function IsCpuCoreVoltageSensor(nameLower As String) As Boolean
+        If String.IsNullOrWhiteSpace(nameLower) Then
+            Return False
+        End If
+        If nameLower.Contains("core") OrElse nameLower.Contains("vid") Then
+            Return True
+        End If
+        Return False
+    End Function
+
+    Private Sub ResetThrottleHeuristic()
+        _throttlePeakClockMHz = Single.NaN
+        _throttleLoadedSamples = 0
+        _throttleLowClockSamples = 0
+        _throttleLastActive = False
+        _throttleLastDetail = String.Empty
+    End Sub
+
+    Private Function GetHeuristicThrottleTempThreshold() As Single
+        Select Case GetCpuVendor()
+            Case CpuVendor.Amd
+                Return 90.0F
+            Case CpuVendor.Intel
+                Return 95.0F
+            Case Else
+                Return 92.0F
+        End Select
+    End Function
+
+    Private Function EvaluateHeuristicThrottle(avgClockMHz As Single, maxTempC As Single, cpuUsage As Integer, ByRef detail As String) As Boolean
+        detail = String.Empty
+
+        If Single.IsNaN(avgClockMHz) OrElse avgClockMHz <= 0 Then
+            _throttleLowClockSamples = 0
+            Return False
+        End If
+
+        Dim usageLoaded As Boolean = cpuUsage >= ThrottleMinCpuUsagePercent
+        If Not usageLoaded Then
+            _throttleLoadedSamples = 0
+            _throttleLowClockSamples = 0
+            Return False
+        End If
+
+        _throttleLoadedSamples += 1
+        If Single.IsNaN(_throttlePeakClockMHz) OrElse avgClockMHz > _throttlePeakClockMHz Then
+            _throttlePeakClockMHz = avgClockMHz
+        End If
+
+        Dim peakClock As Single = _throttlePeakClockMHz
+        If Single.IsNaN(peakClock) OrElse peakClock <= 0 Then
+            Return False
+        End If
+
+        Dim ratio As Single = avgClockMHz / peakClock
+        Dim tempThreshold As Single = GetHeuristicThrottleTempThreshold()
+        Dim tempHigh As Boolean = Not Single.IsNaN(maxTempC) AndAlso maxTempC >= tempThreshold
+        Dim clockDropped As Boolean = ratio <= ThrottleDropRatio
+        Dim severeDrop As Boolean = ratio <= ThrottleSevereDropRatio
+        Dim lowSampleTarget As Integer = If(tempHigh, ThrottleMinLowSamplesHot, ThrottleMinLowSamplesSevere)
+
+        If (clockDropped AndAlso tempHigh) OrElse severeDrop Then
+            _throttleLowClockSamples += 1
+        Else
+            _throttleLowClockSamples = 0
+        End If
+
+        Dim active As Boolean = _throttleLoadedSamples >= ThrottleMinLoadedSamples AndAlso _throttleLowClockSamples >= lowSampleTarget
+        Dim dropPercent As Single = ComputeClockDropPercent(avgClockMHz, peakClock)
+        detail = $"Heuristic clock drop {dropPercent:F0}% (avg {avgClockMHz:F0} MHz, peak {peakClock:F0} MHz, load {cpuUsage}%, max {FormatCelsiusOrNa(maxTempC)})"
+        _throttleLastActive = active
+        _throttleLastDetail = detail
+        Return active
+    End Function
+
+    Private Function ComputeClockDropPercent(avgClockMHz As Single, peakClockMHz As Single) As Single
+        If Single.IsNaN(avgClockMHz) OrElse Single.IsNaN(peakClockMHz) OrElse peakClockMHz <= 0 Then
+            Return Single.NaN
+        End If
+        Dim ratio As Single = avgClockMHz / peakClockMHz
+        If ratio > 1.0F Then
+            ratio = 1.0F
+        ElseIf ratio < 0.0F Then
+            ratio = 0.0F
+        End If
+        Return (1.0F - ratio) * 100.0F
+    End Function
+
+    Private Sub AppendThrottleHeuristicReadings(readings As List(Of SensorReading), avgClockMHz As Single, peakClockMHz As Single, dropPercent As Single, cpuUsage As Integer, maxTempC As Single, isActive As Boolean)
+        If readings Is Nothing Then
+            Return
+        End If
+
+        readings.Add(New SensorReading("CPU Throttle (Heuristic)", If(isActive, "Active", "Inactive"), IconThrottle))
+        readings.Add(CreateSensorReading("CPU Throttle (Heuristic) - Avg Core Clock", IconClock, If(Single.IsNaN(avgClockMHz), CType(Nothing, Nullable(Of Single)), avgClockMHz), SensorValueFormat.Mhz))
+        readings.Add(CreateSensorReading("CPU Throttle (Heuristic) - Peak Core Clock", IconClock, If(Single.IsNaN(peakClockMHz), CType(Nothing, Nullable(Of Single)), peakClockMHz), SensorValueFormat.Mhz))
+
+        Dim dropValue As Nullable(Of Single) = If(Single.IsNaN(dropPercent), CType(Nothing, Nullable(Of Single)), dropPercent)
+        readings.Add(CreateSensorReading("CPU Throttle (Heuristic) - Clock Drop", IconThrottle, dropValue, SensorValueFormat.Percent))
+
+        Dim clampedUsage As Single = CSng(Math.Max(0, Math.Min(100, cpuUsage)))
+        readings.Add(CreateSensorReading("CPU Throttle (Heuristic) - Load", IconThrottle, clampedUsage, SensorValueFormat.Percent))
+        readings.Add(CreateSensorReading("CPU Throttle (Heuristic) - Max Temp", IconTemperature, If(Single.IsNaN(maxTempC), CType(Nothing, Nullable(Of Single)), maxTempC), SensorValueFormat.Celsius))
+    End Sub
 
     Private Function GetCpuVendor() As CpuVendor
         If _cpuVendorResolved Then
@@ -1357,11 +2384,42 @@ Public Class frmMain
         Return StressTestType.IntegerPrimes
     End Function
 
+    Private Function SelectBlendWorkload(threadIndex As Integer, avxAvailable As Boolean) As StressTestType
+        If avxAvailable Then
+            Select Case threadIndex Mod 5
+                Case 0
+                    Return StressTestType.FloatingPoint
+                Case 1
+                    Return StressTestType.IntegerPrimes
+                Case 2
+                    Return StressTestType.IntegerHeavy
+                Case 3
+                    Return StressTestType.MemoryBandwidth
+                Case Else
+                    Return StressTestType.AVX
+            End Select
+        End If
+
+        Select Case threadIndex Mod 4
+            Case 0
+                Return StressTestType.FloatingPoint
+            Case 1
+                Return StressTestType.IntegerPrimes
+            Case 2
+                Return StressTestType.IntegerHeavy
+            Case Else
+                Return StressTestType.MemoryBandwidth
+        End Select
+    End Function
+
     Private Sub StartStressTest()
         btnStart.Text = "Stop"
         btnStart.Image = My.Resources._stop
+        ResetThrottleHeuristic()
 
         SetTitleBarText("[Running]")
+
+        NormalizeRunOptions(_runOptions)
 
         ' Initialize throughput tracking.
         _operationsCompleted = 0
@@ -1373,25 +2431,41 @@ Public Class frmMain
         AddHandler _throughputTimer.Tick, AddressOf _throughputTimer_Tick
         _throughputTimer.Start()
 
-        Dim selectedTestType As StressTestType
-        If cmbStressType.SelectedItem IsNot Nothing AndAlso [Enum].TryParse(cmbStressType.SelectedItem.ToString(), selectedTestType) Then
-            LogMessage($"Starting {selectedTestType} Stress Test...")
-        Else
-            LogMessage("Error: No valid stress test type selected. Defaulting to FloatingPoint.")
-            selectedTestType = StressTestType.FloatingPoint
-            cmbStressType.SelectedItem = selectedTestType
-        End If
+        Dim selectedTestType As StressTestType = GetSelectedStressType()
+        LogMessage($"Starting {GetStressModeLabel(selectedTestType)} Stress Test...")
 
         Dim avxAvailable As Boolean = Vector.IsHardwareAccelerated
         If selectedTestType = StressTestType.AVX AndAlso Not avxAvailable Then
             LogMessage("AVX selected but SIMD acceleration is not available. Falling back to FloatingPoint.")
             selectedTestType = StressTestType.FloatingPoint
-            cmbStressType.SelectedItem = selectedTestType
+            SetSelectedStressType(selectedTestType)
         End If
 
         cts = New Threading.CancellationTokenSource()
         Dim token As Threading.CancellationToken = cts.Token
         ThreadsArray.Clear()
+
+        _stressTester.PrimeRangeMin = MinValuePrime
+        _stressTester.PrimeRangeMax = MaxValuePrime
+        StartValidation(True)
+        Dim validationSettings As ValidationSettings = _validationSettings
+        Dim reportError As Action(Of String) = Sub(message)
+                                                   LogMessage(message)
+                                                   UpdateValidationStatusText()
+                                                   TriggerAutoStop(message)
+                                               End Sub
+        Dim reportStatus As Action(Of String) = Sub(message)
+                                                    HandleValidationStatusMessage(message)
+                                                End Sub
+
+        SyncLock _validationStatusLock
+            _validationStatusByWorker.Clear()
+        End SyncLock
+        If _runOptions.ValidationMode = ValidationMode.Off Then
+            UpdateValidationStatusLine(ValidationLogPrefix & "Off")
+        Else
+            UpdateValidationStatusLine(ValidationLogPrefix & "Starting...")
+        End If
 
         Dim threadCount As Integer = GetEffectiveThreadCount()
         If _runOptions.UiSnappyMode AndAlso threadCount < NumThreads.Value Then
@@ -1412,11 +2486,15 @@ Public Class frmMain
             End If
         End If
 
+        Dim baseSeed As ULong = BitConverter.ToUInt64(BitConverter.GetBytes(Environment.TickCount64), 0) Xor &H9E3779B97F4A7C15UL
+
         For i = 0 To threadCount - 1
             Dim reportProgressAction As Action(Of Integer) = Sub(ops) Interlocked.Add(_operationsCompleted, ops)
             Dim workloadType As StressTestType = selectedTestType
             If selectedTestType = StressTestType.Mixed Then
                 workloadType = SelectMixedWorkload(i, avxAvailable)
+            ElseIf selectedTestType = StressTestType.Blend Then
+                workloadType = SelectBlendWorkload(i, avxAvailable)
             End If
 
             Dim coreIndex As Integer? = Nothing
@@ -1424,23 +2502,20 @@ Public Class frmMain
                 coreIndex = affinityCores(i Mod affinityCores.Count)
             End If
 
+            Dim indexSeed As ULong = CULng(i)
+            Dim workerSeed As ULong = baseSeed Xor (indexSeed << 1) Xor (indexSeed << 33) Xor (indexSeed << 47)
+            Dim worker As IStressWorker = _stressTester.CreateWorker(workloadType, i, workerSeed)
+            Dim kernelName As String = If(worker IsNot Nothing, worker.KernelName, workloadType.ToString())
+
             Dim threadStart As Threading.ThreadStart = Sub()
                                                            If coreIndex.HasValue Then
                                                                If Not ThreadAffinity.TrySetCurrentThreadAffinity(coreIndex.Value) Then
                                                                    LogMessage($"Affinity set failed for core {coreIndex.Value}.")
                                                                End If
                                                            End If
-
-                                                           Select Case workloadType
-                                                               Case StressTestType.IntegerPrimes
-                                                                   _stressTester.FindPrimesInRange(MinValuePrime, MaxValuePrime, token, reportProgressAction)
-                                                               Case StressTestType.FloatingPoint
-                                                                   _stressTester.PerformFpWorkload(token, reportProgressAction)
-                                                               Case StressTestType.AVX
-                                                                   _stressTester.PerformAvxWorkload(token, reportProgressAction)
-                                                               Case Else
-                                                                   _stressTester.PerformFpWorkload(token, reportProgressAction)
-                                                           End Select
+                                                           If worker IsNot Nothing Then
+                                                               worker.Run(token, reportProgressAction, validationSettings, reportError, reportStatus)
+                                                           End If
                                                        End Sub
 
             Dim t As Threading.Thread = New Threading.Thread(threadStart)
@@ -1463,13 +2538,12 @@ Public Class frmMain
             t.Start()
 
             Dim affinityInfo As String = If(coreIndex.HasValue, $" Core {coreIndex.Value}", String.Empty)
-            LogMessage($"Thread Created ({workloadType}){affinityInfo} [Thread ID] : {t.ManagedThreadId}")
+            LogMessage($"Thread Created ({kernelName}){affinityInfo} [Thread ID] : {t.ManagedThreadId}")
         Next
 
         UpdateActiveThreadCount()
         StartTelemetry()
         StartTimedRun()
-        StartValidation()
         If _runOptions.AutoShowTempPlot Then
             ShowTemperaturePlotWindow()
         End If
@@ -1481,6 +2555,7 @@ Public Class frmMain
         End If
 
         Try
+            ResetThrottleHeuristic()
             If Not String.IsNullOrWhiteSpace(reason) Then
                 LogMessage(reason)
             End If
@@ -1515,6 +2590,12 @@ Public Class frmMain
 
             btnStart.Text = "Start"
             btnStart.Image = My.Resources.arrow_right_3
+            UpdateValidationStatusText()
+
+            SyncLock _validationStatusLock
+                _validationStatusByWorker.Clear()
+            End SyncLock
+            UpdateValidationStatusLine(ValidationLogPrefix & "Off")
         Finally
             Interlocked.Exchange(_stopInProgress, 0)
         End Try
@@ -1633,32 +2714,27 @@ Public Class frmMain
         End SyncLock
     End Sub
 
-    Private Sub StartValidation()
-        If Not _runOptions.ValidationEnabled Then
-            Return
+    Private Sub StartValidation(Optional reset As Boolean = True)
+        NormalizeRunOptions(_runOptions)
+
+        If _validationSettings Is Nothing Then
+            _validationSettings = New ValidationSettings()
         End If
 
-        StopValidation()
-
-        _validationCts = New Threading.CancellationTokenSource()
-        Dim token As Threading.CancellationToken = _validationCts.Token
-        Dim reportError As Action(Of String) = Sub(message)
-                                                   LogMessage(message)
-                                                   TriggerAutoStop(message)
-                                               End Sub
-
-        _validationThread = New Threading.Thread(Sub() _stressTester.RunValidationLoop(token, reportError))
-        _validationThread.IsBackground = True
-        _validationThread.Start()
+        _validationSettings.Mode = _runOptions.ValidationMode
+        _validationSettings.IntervalMs = _runOptions.ValidationIntervalMs
+        _validationSettings.BatchSize = _runOptions.ValidationBatchSize
+        If reset Then
+            _validationSettings.Reset()
+        End If
+        UpdateValidationStatusText()
     End Sub
 
     Private Sub StopValidation()
-        If _validationCts IsNot Nothing Then
-            _validationCts.Cancel()
-            _validationCts.Dispose()
-            _validationCts = Nothing
+        If _validationSettings IsNot Nothing Then
+            _validationSettings.Mode = ValidationMode.Off
         End If
-        _validationThread = Nothing
+        UpdateValidationStatusText()
     End Sub
 
     Private Sub TriggerAutoStop(reason As String)
@@ -1681,19 +2757,135 @@ Public Class frmMain
             .UiSnappyMode = source.UiSnappyMode,
             .TelemetryEnabled = source.TelemetryEnabled,
             .TelemetryIntervalMs = source.TelemetryIntervalMs,
+            .ShowAdvancedWorkloads = source.ShowAdvancedWorkloads,
             .ValidationEnabled = source.ValidationEnabled,
+            .ValidationMode = source.ValidationMode,
+            .ValidationIntervalMs = source.ValidationIntervalMs,
+            .ValidationBatchSize = source.ValidationBatchSize,
             .AutoShowTempPlot = source.AutoShowTempPlot,
             .UseAffinity = source.UseAffinity,
             .AffinityCores = If(source.AffinityCores IsNot Nothing, New List(Of Integer)(source.AffinityCores), New List(Of Integer)())
         }
+        NormalizeRunOptions(copy)
         Return copy
     End Function
 
-    Private Function BuildProfileFromUi() As ProfileData
-        Dim stressName As String = StressTestType.FloatingPoint.ToString()
-        If cmbStressType.SelectedItem IsNot Nothing Then
-            stressName = cmbStressType.SelectedItem.ToString()
+    Private Sub NormalizeRunOptions(options As RunOptions)
+        If options Is Nothing Then
+            Return
         End If
+
+        If options.ValidationMode = ValidationMode.Off AndAlso options.ValidationEnabled Then
+            options.ValidationMode = ValidationMode.Light
+        End If
+
+        If options.ValidationIntervalMs <= 0 Then
+            options.ValidationIntervalMs = 30000
+        End If
+
+        If options.ValidationBatchSize <= 0 Then
+            options.ValidationBatchSize = 4096
+        End If
+    End Sub
+
+    Private Class StressModeOption
+        Public ReadOnly DisplayName As String
+        Public ReadOnly Value As StressTestType
+
+        Public Sub New(displayName As String, value As StressTestType)
+            Me.DisplayName = displayName
+            Me.Value = value
+        End Sub
+
+        Public Overrides Function ToString() As String
+            Return DisplayName
+        End Function
+    End Class
+
+    Private Shared Function IsAdvancedStressType(value As StressTestType) As Boolean
+        Select Case value
+            Case StressTestType.IntegerHeavy, StressTestType.MemoryBandwidth, StressTestType.Blend
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Shared Function GetStressModeLabel(value As StressTestType) As String
+        Select Case value
+            Case StressTestType.FloatingPoint
+                Return "Floating Point"
+            Case StressTestType.IntegerPrimes
+                Return "Integer (Primes)"
+            Case StressTestType.AVX
+                Return "AVX (Vector)"
+            Case StressTestType.Mixed
+                Return "Mixed"
+            Case StressTestType.Blend
+                Return "Blend"
+            Case StressTestType.IntegerHeavy
+                Return "Integer Heavy"
+            Case StressTestType.MemoryBandwidth
+                Return "Memory Bandwidth"
+            Case Else
+                Return value.ToString()
+        End Select
+    End Function
+
+    Private Function GetSelectedStressType() As StressTestType
+        Dim selectedOption As StressModeOption = TryCast(cmbStressType.SelectedItem, StressModeOption)
+        If selectedOption IsNot Nothing Then
+            Return selectedOption.Value
+        End If
+
+        Dim parsed As StressTestType
+        If cmbStressType.SelectedItem IsNot Nothing AndAlso [Enum].TryParse(cmbStressType.SelectedItem.ToString(), parsed) Then
+            Return parsed
+        End If
+
+        Return StressTestType.FloatingPoint
+    End Function
+
+    Private Sub SetSelectedStressType(value As StressTestType)
+        If _runOptions IsNot Nothing AndAlso IsAdvancedStressType(value) Then
+            _runOptions.ShowAdvancedWorkloads = True
+        End If
+        UpdateStressModeList(value)
+    End Sub
+
+    Private Sub UpdateStressModeList(Optional selectedType As Nullable(Of StressTestType) = Nothing)
+        If cmbStressType Is Nothing Then
+            Return
+        End If
+
+        Dim current As StressTestType = If(selectedType.HasValue, selectedType.Value, GetSelectedStressType())
+        Dim showAdvanced As Boolean = _runOptions IsNot Nothing AndAlso _runOptions.ShowAdvancedWorkloads
+
+        Dim options As New List(Of StressModeOption) From {
+            New StressModeOption(GetStressModeLabel(StressTestType.FloatingPoint), StressTestType.FloatingPoint),
+            New StressModeOption(GetStressModeLabel(StressTestType.IntegerPrimes), StressTestType.IntegerPrimes),
+            New StressModeOption(GetStressModeLabel(StressTestType.AVX), StressTestType.AVX),
+            New StressModeOption(GetStressModeLabel(StressTestType.Mixed), StressTestType.Mixed)
+        }
+
+        Dim advancedTypes As StressTestType() = {StressTestType.Blend, StressTestType.IntegerHeavy, StressTestType.MemoryBandwidth}
+        If showAdvanced Then
+            For Each value As StressTestType In advancedTypes
+                options.Add(New StressModeOption(GetStressModeLabel(value) & " (Advanced)", value))
+            Next
+        ElseIf IsAdvancedStressType(current) Then
+            options.Add(New StressModeOption(GetStressModeLabel(current) & " (Advanced)", current))
+        End If
+
+        cmbStressType.DataSource = options
+        Dim selection As StressModeOption = options.FirstOrDefault(Function(o) o.Value = current)
+        If selection IsNot Nothing Then
+            cmbStressType.SelectedItem = selection
+        End If
+    End Sub
+
+    Private Function BuildProfileFromUi() As ProfileData
+        Dim stressName As String = GetSelectedStressType().ToString()
 
         Dim profile As New ProfileData() With {
             .Threads = CInt(NumThreads.Value),
@@ -1722,7 +2914,7 @@ Public Class frmMain
 
             Dim parsedType As StressTestType
             If Not String.IsNullOrWhiteSpace(profile.StressType) AndAlso [Enum].TryParse(profile.StressType, parsedType) Then
-                cmbStressType.SelectedItem = parsedType
+                SetSelectedStressType(parsedType)
             End If
 
             If Not String.IsNullOrWhiteSpace(profile.ThreadPriority) Then
@@ -1736,8 +2928,10 @@ Public Class frmMain
                 If _runOptions.AffinityCores Is Nothing Then
                     _runOptions.AffinityCores = New List(Of Integer)()
                 End If
+                NormalizeRunOptions(_runOptions)
             Else
                 _runOptions = New RunOptions()
+                NormalizeRunOptions(_runOptions)
             End If
 
             If profile.PlotTimeWindowSeconds > 0 Then
@@ -1771,9 +2965,9 @@ Public Class frmMain
                 StopTimedRun()
             End If
 
-            If _runOptions.ValidationEnabled AndAlso _validationThread Is Nothing Then
-                StartValidation()
-            ElseIf Not _runOptions.ValidationEnabled AndAlso _validationThread IsNot Nothing Then
+            If _runOptions.ValidationMode <> ValidationMode.Off Then
+                StartValidation(False)
+            Else
                 StopValidation()
             End If
 
@@ -1781,6 +2975,9 @@ Public Class frmMain
                 LogMessage("Core affinity changes apply on the next run.")
             End If
         End If
+
+        UpdateStressModeList(GetSelectedStressType())
+        UpdateValidationStatusText()
     End Sub
 
     Private Function CreateProfile(threads As Integer, stressType As StressTestType, priority As String, saveLog As Boolean, options As RunOptions, plotWindowSeconds As Single) As ProfileData
@@ -1798,6 +2995,7 @@ Public Class frmMain
         If profile.RunOptions.AffinityCores Is Nothing Then
             profile.RunOptions.AffinityCores = New List(Of Integer)()
         End If
+        NormalizeRunOptions(profile.RunOptions)
         Return profile
     End Function
 
@@ -1820,7 +3018,7 @@ Public Class frmMain
             .UiSnappyMode = True,
             .TelemetryEnabled = True,
             .TelemetryIntervalMs = 1000,
-            .ValidationEnabled = True,
+            .ValidationMode = ValidationMode.Light,
             .AutoShowTempPlot = True
         }, 300)
 
@@ -2027,7 +3225,14 @@ Public Class frmMain
             dlg.MaximizeBox = False
             dlg.MinimizeBox = False
             dlg.ShowInTaskbar = False
-            dlg.ClientSize = New Size(420, 336)
+            dlg.ClientSize = New Size(420, 392)
+
+            Dim tip As New ToolTip() With {
+                .AutoPopDelay = 12000,
+                .InitialDelay = 500,
+                .ReshowDelay = 150,
+                .ShowAlways = True
+            }
 
             Dim leftLabel As Integer = 12
             Dim leftControl As Integer = 230
@@ -2036,6 +3241,8 @@ Public Class frmMain
 
             Dim chkTimed As New CheckBox() With {.Text = "Timed run (minutes)", .AutoSize = True, .Location = New Point(leftLabel, row)}
             Dim numTimed As New NumericUpDown() With {.Location = New Point(leftControl, row - 2), .Minimum = 1, .Maximum = 1440, .Width = 120}
+            tip.SetToolTip(chkTimed, "Stop automatically after a fixed duration.")
+            tip.SetToolTip(numTimed, "Duration in minutes for the timed run.")
             chkTimed.Checked = working.TimedRunMinutes > 0
             Dim timedValue As Decimal = If(working.TimedRunMinutes > 0, CDec(working.TimedRunMinutes), 10D)
             If timedValue < numTimed.Minimum Then timedValue = numTimed.Minimum
@@ -2047,6 +3254,8 @@ Public Class frmMain
 
             Dim chkTemp As New CheckBox() With {.Text = "Auto-stop at temp (C)", .AutoSize = True, .Location = New Point(leftLabel, row)}
             Dim numTemp As New NumericUpDown() With {.Location = New Point(leftControl, row - 2), .Minimum = 40, .Maximum = 125, .Width = 120, .DecimalPlaces = 0}
+            tip.SetToolTip(chkTemp, "Stop when CPU temperature exceeds the limit.")
+            tip.SetToolTip(numTemp, "Temperature threshold in Celsius.")
             chkTemp.Checked = working.AutoStopTempC > 0
             Dim tempValue As Decimal = If(working.AutoStopTempC > 0, CDec(working.AutoStopTempC), 90D)
             If tempValue < numTemp.Minimum Then tempValue = numTemp.Minimum
@@ -2057,15 +3266,19 @@ Public Class frmMain
             row += rowHeight
 
             Dim chkThrottle As New CheckBox() With {.Text = "Auto-stop on CPU throttling", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            tip.SetToolTip(chkThrottle, "Stop if throttling is detected while running.")
             chkThrottle.Checked = working.AutoStopOnThrottle
             row += rowHeight
 
             Dim chkUiSnappy As New CheckBox() With {.Text = "UI snappy mode (reserve 1 core)", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            tip.SetToolTip(chkUiSnappy, "Reserves one core to keep the UI responsive.")
             chkUiSnappy.Checked = working.UiSnappyMode
             row += rowHeight
 
             Dim chkTelemetry As New CheckBox() With {.Text = "CSV telemetry log (ms)", .AutoSize = True, .Location = New Point(leftLabel, row)}
             Dim numTelemetry As New NumericUpDown() With {.Location = New Point(leftControl, row - 2), .Minimum = 250, .Maximum = 10000, .Increment = 250, .Width = 120}
+            tip.SetToolTip(chkTelemetry, "Write CSV telemetry while running.")
+            tip.SetToolTip(numTelemetry, "Sampling interval in milliseconds.")
             chkTelemetry.Checked = working.TelemetryEnabled
             Dim telemetryValue As Decimal = CDec(working.TelemetryIntervalMs)
             If telemetryValue < numTelemetry.Minimum Then telemetryValue = numTelemetry.Minimum
@@ -2075,16 +3288,42 @@ Public Class frmMain
             AddHandler chkTelemetry.CheckedChanged, Sub() numTelemetry.Enabled = chkTelemetry.Checked
             row += rowHeight
 
-            Dim chkValidation As New CheckBox() With {.Text = "Enable validation loop", .AutoSize = True, .Location = New Point(leftLabel, row)}
-            chkValidation.Checked = working.ValidationEnabled
+            Dim lblValidation As New Label() With {.Text = "Validation mode", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            Dim cmbValidation As New ComboBox() With {.Location = New Point(leftControl, row - 3), .Width = 120, .DropDownStyle = ComboBoxStyle.DropDownList}
+            tip.SetToolTip(lblValidation, "Select how much validation to perform.")
+            tip.SetToolTip(cmbValidation, "Off disables validation. Light/Full add periodic checks.")
+            cmbValidation.Items.AddRange(New Object() {ValidationMode.Off.ToString(), ValidationMode.Light.ToString(), ValidationMode.Full.ToString()})
+            cmbValidation.SelectedItem = working.ValidationMode.ToString()
+            row += rowHeight
+
+            Dim lblValidationInterval As New Label() With {.Text = "Validation interval (ms)", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            Dim numValidationInterval As New NumericUpDown() With {.Location = New Point(leftControl, row - 2), .Minimum = 250, .Maximum = 600000, .Increment = 250, .Width = 120}
+            tip.SetToolTip(lblValidationInterval, "How often each worker validates results.")
+            tip.SetToolTip(numValidationInterval, "Validation interval in milliseconds.")
+            Dim intervalValue As Decimal = CDec(working.ValidationIntervalMs)
+            If intervalValue < numValidationInterval.Minimum Then intervalValue = numValidationInterval.Minimum
+            If intervalValue > numValidationInterval.Maximum Then intervalValue = numValidationInterval.Maximum
+            numValidationInterval.Value = intervalValue
+            numValidationInterval.Enabled = Not String.Equals(cmbValidation.SelectedItem?.ToString(), ValidationMode.Off.ToString(), StringComparison.OrdinalIgnoreCase)
+            AddHandler cmbValidation.SelectedIndexChanged, Sub()
+                                                               numValidationInterval.Enabled = Not String.Equals(cmbValidation.SelectedItem?.ToString(), ValidationMode.Off.ToString(), StringComparison.OrdinalIgnoreCase)
+                                                           End Sub
+            row += rowHeight
+
+            Dim chkAdvancedWorkloads As New CheckBox() With {.Text = "Show advanced workloads", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            tip.SetToolTip(chkAdvancedWorkloads, "Show extra workloads like Blend or Memory Bandwidth.")
+            chkAdvancedWorkloads.Checked = working.ShowAdvancedWorkloads
             row += rowHeight
 
             Dim chkAutoPlot As New CheckBox() With {.Text = "Auto-show temp plot on start", .AutoSize = True, .Location = New Point(leftLabel, row)}
+            tip.SetToolTip(chkAutoPlot, "Open the temperature plot automatically when starting.")
             chkAutoPlot.Checked = working.AutoShowTempPlot
             row += rowHeight
 
             Dim chkAffinity As New CheckBox() With {.Text = "Use core affinity", .AutoSize = True, .Location = New Point(leftLabel, row)}
             Dim btnAffinity As New Button() With {.Text = "Select...", .Location = New Point(leftControl, row - 4), .Width = 120}
+            tip.SetToolTip(chkAffinity, "Pin worker threads to selected CPU cores.")
+            tip.SetToolTip(btnAffinity, "Choose which CPU cores to use.")
             Dim selectedCores As New List(Of Integer)(working.AffinityCores)
             chkAffinity.Checked = working.UseAffinity
             btnAffinity.Enabled = chkAffinity.Checked
@@ -2092,6 +3331,7 @@ Public Class frmMain
             row += rowHeight
 
             Dim lblAffinity As New Label() With {.AutoSize = True, .Location = New Point(leftLabel, row)}
+            tip.SetToolTip(lblAffinity, "Summary of selected cores.")
             Dim updateAffinityLabel As Action = Sub()
                                                     If selectedCores.Count = 0 Then
                                                         lblAffinity.Text = "Selected cores: All"
@@ -2105,12 +3345,14 @@ Public Class frmMain
                                               updateAffinityLabel()
                                           End Sub
 
-            Dim btnOk As New Button() With {.Text = "OK", .DialogResult = DialogResult.OK, .Location = New Point(240, 286), .Width = 70}
-            Dim btnCancel As New Button() With {.Text = "Cancel", .DialogResult = DialogResult.Cancel, .Location = New Point(320, 286), .Width = 70}
+            Dim btnOk As New Button() With {.Text = "OK", .DialogResult = DialogResult.OK, .Location = New Point(240, 342), .Width = 70}
+            Dim btnCancel As New Button() With {.Text = "Cancel", .DialogResult = DialogResult.Cancel, .Location = New Point(320, 342), .Width = 70}
+            tip.SetToolTip(btnOk, "Apply changes and close.")
+            tip.SetToolTip(btnCancel, "Discard changes and close.")
             dlg.AcceptButton = btnOk
             dlg.CancelButton = btnCancel
 
-            dlg.Controls.AddRange(New Control() {chkTimed, numTimed, chkTemp, numTemp, chkThrottle, chkUiSnappy, chkTelemetry, numTelemetry, chkValidation, chkAutoPlot, chkAffinity, btnAffinity, lblAffinity, btnOk, btnCancel})
+            dlg.Controls.AddRange(New Control() {chkTimed, numTimed, chkTemp, numTemp, chkThrottle, chkUiSnappy, chkTelemetry, numTelemetry, lblValidation, cmbValidation, lblValidationInterval, numValidationInterval, chkAdvancedWorkloads, chkAutoPlot, chkAffinity, btnAffinity, lblAffinity, btnOk, btnCancel})
 
             If dlg.ShowDialog(Me) <> DialogResult.OK Then
                 Return Nothing
@@ -2122,7 +3364,12 @@ Public Class frmMain
             working.UiSnappyMode = chkUiSnappy.Checked
             working.TelemetryEnabled = chkTelemetry.Checked
             working.TelemetryIntervalMs = CInt(numTelemetry.Value)
-            working.ValidationEnabled = chkValidation.Checked
+            Dim validationSelection As String = If(cmbValidation.SelectedItem?.ToString(), ValidationMode.Off.ToString())
+            Dim parsedMode As ValidationMode = ValidationMode.Off
+            [Enum].TryParse(validationSelection, parsedMode)
+            working.ValidationMode = parsedMode
+            working.ValidationIntervalMs = CInt(numValidationInterval.Value)
+            working.ShowAdvancedWorkloads = chkAdvancedWorkloads.Checked
             working.AutoShowTempPlot = chkAutoPlot.Checked
             working.UseAffinity = chkAffinity.Checked AndAlso selectedCores.Count > 0
             working.AffinityCores = If(working.UseAffinity, selectedCores, New List(Of Integer)())
@@ -2144,7 +3391,15 @@ Public Class frmMain
             dlg.ShowInTaskbar = False
             dlg.ClientSize = New Size(260, 360)
 
+            Dim tip As New ToolTip() With {
+                .AutoPopDelay = 12000,
+                .InitialDelay = 500,
+                .ReshowDelay = 150,
+                .ShowAlways = True
+            }
+
             Dim list As New CheckedListBox() With {.Location = New Point(12, 12), .Size = New Size(236, 280)}
+            tip.SetToolTip(list, "Select CPU cores to pin worker threads.")
             For i As Integer = 0 To maxSelectable - 1
                 Dim index As Integer = list.Items.Add($"CPU {i}")
                 If selected.Contains(i) Then
@@ -2153,9 +3408,12 @@ Public Class frmMain
             Next
 
             Dim note As New Label() With {.AutoSize = True, .Location = New Point(12, 298), .Text = $"Showing 0-{maxSelectable - 1} cores"}
+            tip.SetToolTip(note, "Core list limited by OS affinity mask.")
 
             Dim btnOk As New Button() With {.Text = "OK", .DialogResult = DialogResult.OK, .Location = New Point(90, 320), .Width = 70}
             Dim btnCancel As New Button() With {.Text = "Cancel", .DialogResult = DialogResult.Cancel, .Location = New Point(170, 320), .Width = 70}
+            tip.SetToolTip(btnOk, "Apply core selection.")
+            tip.SetToolTip(btnCancel, "Keep current selection.")
             dlg.AcceptButton = btnOk
             dlg.CancelButton = btnCancel
 
@@ -2183,6 +3441,7 @@ Public Class frmMain
         End If
 
         _runOptions = updated
+        NormalizeRunOptions(_runOptions)
         ApplyRunOptionsToRunningState()
         SaveCurrentProfile()
 
@@ -2197,6 +3456,7 @@ Public Class frmMain
             End If
             _tempPlotForm.ApplyLayout(_uiLayout.TempPlotWindow)
             _tempPlotForm.TimeWindowSeconds = _plotTimeWindowSeconds
+            _tempPlotForm.ApplySensorSelection(_uiLayout.TempPlotSelectedSensors, _uiLayout.TempPlotSelectionSet)
             AddHandler _tempPlotForm.TimeWindowChanged, AddressOf TempPlotForm_TimeWindowChanged
             AddHandler _tempPlotForm.FormClosing, Sub() SaveTempPlotLayout()
             AddHandler _tempPlotForm.FormClosed, Sub()
@@ -2310,29 +3570,29 @@ Public Class frmMain
         End Using
     End Sub
 
-    Private Async Sub CheckLhmUpdatesToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles CheckLhmUpdatesToolStripMenuItem.Click
-        CheckLhmUpdatesToolStripMenuItem.Enabled = False
+    Private Async Sub CheckForUpdatesToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles CheckForUpdatesToolStripMenuItem.Click
+        CheckForUpdatesToolStripMenuItem.Enabled = False
         Try
-            Dim installedVersion As String = GetInstalledLhmVersion()
-            Dim latestVersion As String = Await GetLatestLhmVersionAsync()
-
-            If String.IsNullOrWhiteSpace(latestVersion) Then
-                MessageBox.Show(Me, "Unable to check for LibreHardwareMonitor updates right now.", "Update Check", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Dim release As UpdateReleaseInfo = Await UpdateService.GetLatestReleaseAsync()
+            If release Is Nothing OrElse String.IsNullOrWhiteSpace(release.TagName) Then
+                MessageBox.Show(Me, "Unable to check for updates right now.", "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Information)
                 Return
             End If
 
-            Dim comparison As Integer = CompareNuGetVersions(installedVersion, latestVersion)
-            Dim message As String
-            If comparison >= 0 Then
-                message = $"LibreHardwareMonitor is up to date.{Environment.NewLine}Installed: {installedVersion}{Environment.NewLine}Latest: {latestVersion}"
-            Else
-                message = $"An update is available.{Environment.NewLine}Installed: {installedVersion}{Environment.NewLine}Latest: {latestVersion}"
+            Dim currentVersion As Version = My.Application.Info.Version
+            If Not UpdateService.IsUpdateAvailable(currentVersion, release.Version) Then
+                Dim message As String = $"Installed: {GetAppVersionDisplay()}{Environment.NewLine}Latest: {FormatVersionDisplay(release.Version)}"
+                MessageBox.Show(Me, $"You're up to date.{Environment.NewLine}{message}", "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                Return
             End If
-            MessageBox.Show(Me, message, "LibreHardwareMonitor Updates", MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+            Using dlg As New frmUpdate(release, currentVersion)
+                dlg.ShowDialog(Me)
+            End Using
         Catch ex As Exception
-            MessageBox.Show(Me, "Update check failed: " & ex.Message, "LibreHardwareMonitor Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            MessageBox.Show(Me, "Update check failed: " & ex.Message, "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning)
         Finally
-            CheckLhmUpdatesToolStripMenuItem.Enabled = True
+            CheckForUpdatesToolStripMenuItem.Enabled = True
         End Try
     End Sub
 
@@ -2510,7 +3770,8 @@ Public Class frmMain
         sb.AppendLine("<li>UI Snappy Mode: " & _runOptions.UiSnappyMode.ToString() & "</li>")
         sb.AppendLine("<li>Telemetry Enabled: " & _runOptions.TelemetryEnabled.ToString() & "</li>")
         sb.AppendLine("<li>Telemetry Interval (ms): " & _runOptions.TelemetryIntervalMs.ToString() & "</li>")
-        sb.AppendLine("<li>Validation Enabled: " & _runOptions.ValidationEnabled.ToString() & "</li>")
+        sb.AppendLine("<li>Validation Mode: " & _runOptions.ValidationMode.ToString() & "</li>")
+        sb.AppendLine("<li>Validation Interval (ms): " & _runOptions.ValidationIntervalMs.ToString() & "</li>")
         sb.AppendLine("<li>Core Affinity: " & If(_runOptions.UseAffinity AndAlso _runOptions.AffinityCores.Count > 0, String.Join(",", _runOptions.AffinityCores), "All") & "</li>")
         If Not String.IsNullOrWhiteSpace(_telemetryFilePath) Then
             sb.AppendLine("<li>Telemetry File: " & System.Net.WebUtility.HtmlEncode(_telemetryFilePath) & "</li>")
@@ -2530,108 +3791,6 @@ Public Class frmMain
         File.WriteAllText(path, sb.ToString())
     End Sub
 
-    Private Function GetInstalledLhmVersion() As String
-        Dim asm As Assembly = GetType(Computer).Assembly
-        Dim info As AssemblyInformationalVersionAttribute = asm.GetCustomAttribute(Of AssemblyInformationalVersionAttribute)()
-        If info IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(info.InformationalVersion) Then
-            Return info.InformationalVersion
-        End If
-        Return asm.GetName().Version.ToString()
-    End Function
-
-    Private Async Function GetLatestLhmVersionAsync() As Task(Of String)
-        Using client As New HttpClient()
-            client.Timeout = TimeSpan.FromSeconds(10)
-            Dim json As String = Await client.GetStringAsync("https://api.nuget.org/v3-flatcontainer/librehardwaremonitorlib/index.json")
-            Using doc As JsonDocument = JsonDocument.Parse(json)
-                Dim versionsElement As JsonElement = doc.RootElement.GetProperty("versions")
-                Dim latest As String = Nothing
-
-                For Each entry As JsonElement In versionsElement.EnumerateArray()
-                    Dim version As String = entry.GetString()
-                    If String.IsNullOrWhiteSpace(version) Then
-                        Continue For
-                    End If
-                    If String.IsNullOrWhiteSpace(latest) OrElse CompareNuGetVersions(version, latest) > 0 Then
-                        latest = version
-                    End If
-                Next
-
-                Return latest
-            End Using
-        End Using
-    End Function
-
-    Private Function CompareNuGetVersions(a As String, b As String) As Integer
-        If String.Equals(a, b, StringComparison.OrdinalIgnoreCase) Then
-            Return 0
-        End If
-
-        Dim aParts As String() = a.Split("-"c)
-        Dim bParts As String() = b.Split("-"c)
-
-        Dim aBase As Version = ParseVersionSafe(aParts(0))
-        Dim bBase As Version = ParseVersionSafe(bParts(0))
-        Dim baseCompare As Integer = aBase.CompareTo(bBase)
-        If baseCompare <> 0 Then
-            Return baseCompare
-        End If
-
-        Dim aPre As String = If(aParts.Length > 1, aParts(1), String.Empty)
-        Dim bPre As String = If(bParts.Length > 1, bParts(1), String.Empty)
-
-        If String.IsNullOrEmpty(aPre) AndAlso String.IsNullOrEmpty(bPre) Then
-            Return 0
-        End If
-        If String.IsNullOrEmpty(aPre) Then
-            Return 1
-        End If
-        If String.IsNullOrEmpty(bPre) Then
-            Return -1
-        End If
-
-        Dim aNum As Integer = ParsePreReleaseNumber(aPre)
-        Dim bNum As Integer = ParsePreReleaseNumber(bPre)
-        If aNum >= 0 AndAlso bNum >= 0 Then
-            Return aNum.CompareTo(bNum)
-        End If
-
-        Return StringComparer.OrdinalIgnoreCase.Compare(aPre, bPre)
-    End Function
-
-    Private Function ParseVersionSafe(text As String) As Version
-        Dim clean As String = text
-        Dim plusIndex As Integer = clean.IndexOf("+"c)
-        If plusIndex >= 0 Then
-            clean = clean.Substring(0, plusIndex)
-        End If
-
-        Dim parts As String() = clean.Split("."c)
-        Dim major As Integer = If(parts.Length > 0, ToIntSafe(parts(0)), 0)
-        Dim minor As Integer = If(parts.Length > 1, ToIntSafe(parts(1)), 0)
-        Dim build As Integer = If(parts.Length > 2, ToIntSafe(parts(2)), 0)
-        Dim revision As Integer = If(parts.Length > 3, ToIntSafe(parts(3)), 0)
-        Return New Version(major, minor, build, revision)
-    End Function
-
-    Private Function ParsePreReleaseNumber(tag As String) As Integer
-        If tag.StartsWith("pre", StringComparison.OrdinalIgnoreCase) Then
-            Dim numText As String = tag.Substring(3)
-            Dim value As Integer
-            If Integer.TryParse(numText, value) Then
-                Return value
-            End If
-        End If
-        Return -1
-    End Function
-
-    Private Function ToIntSafe(text As String) As Integer
-        Dim value As Integer
-        If Integer.TryParse(text, value) Then
-            Return value
-        End If
-        Return 0
-    End Function
 
 
 
@@ -2684,6 +3843,20 @@ Public Class frmMain
     End Sub
 
 End Class
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Platforms>x86;x64</Platforms>
     <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
     <OutputType>WinExe</OutputType>
     <StartupObject>ClawHammer.My.MyApplication</StartupObject>
@@ -83,7 +84,7 @@
   <PropertyGroup>
     <ApplicationManifest>My Project\app.manifest</ApplicationManifest>
   </PropertyGroup>
-  <Target Name="IncrementBuildVersion" BeforeTargets="GenerateAssemblyInfo">
+  <Target Name="IncrementBuildVersion" BeforeTargets="GetAssemblyAttributes;GenerateAssemblyInfo" Condition="'$(DesignTimeBuild)' != 'true'">
     <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
       <Output TaskParameter="Lines" PropertyName="BuildCounterRaw" />
     </ReadLinesFromFile>
@@ -161,7 +162,10 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.5-pre396" />
+    <EmbeddedResource Include="Resources\PawnIO_setup.exe" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.5" />
     <PackageReference Include="System.Data.DataSetExtensions" Version="4.5.0" />
     <PackageReference Include="System.Management" Version="10.0.1" />
   </ItemGroup>
@@ -171,3 +175,5 @@
     </VisualStudio>
   </ProjectExtensions>
 </Project>
+
+

@@ -87,16 +87,16 @@ Partial Class frmabout
         lblversion.BackColor = Color.FromArgb(CByte(44), CByte(44), CByte(44))
         lblversion.Font = New Font("Lucida Console", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         lblversion.ForeColor = Color.White
-        lblversion.Location = New Point(435, 53)
+        lblversion.Location = New Point(354, 53)
         lblversion.Margin = New Padding(4, 0, 4, 0)
         lblversion.Name = "lblversion"
-        lblversion.Size = New Size(117, 27)
+        lblversion.Size = New Size(198, 27)
         lblversion.TabIndex = 7
         ' 
         ' frmabout
         ' 
-        AutoScaleDimensions = New SizeF(7F, 15F)
-        AutoScaleMode = AutoScaleMode.Font
+        AutoScaleDimensions = New SizeF(96F, 96F)
+        AutoScaleMode = AutoScaleMode.Dpi
         BackColor = SystemColors.Menu
         ClientSize = New Size(566, 555)
         Controls.Add(lblversion)

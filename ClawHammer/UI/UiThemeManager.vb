@@ -200,6 +200,7 @@ Public Module UiThemeManager
         End Get
     End Property
 
+    ' Apply the dark palette to a control tree when dark mode is enabled.
     Public Sub ApplyTheme(root As Control)
         If root Is Nothing Then
             Return
@@ -210,6 +211,7 @@ Public Module UiThemeManager
         ApplyControlTheme(root, DarkPaletteValue)
     End Sub
 
+    ' Recursively theme supported controls and wire owner-draw handlers.
     Private Sub ApplyControlTheme(control As Control, palette As UiThemePalette)
         If control Is Nothing Then
             Return
@@ -321,6 +323,7 @@ Public Module UiThemeManager
         Return _toolStripRenderer
     End Function
 
+    ' Owner-draw ListView so headers/rows match the dark palette.
     Private Sub ConfigureListView(listView As ListView, palette As UiThemePalette)
         If listView Is Nothing Then
             Return
@@ -343,6 +346,7 @@ Public Module UiThemeManager
 
     End Sub
 
+    ' StatusStrip needs explicit theming and paint hooks for dark mode.
     Private Sub ConfigureStatusStrip(statusStrip As StatusStrip, palette As UiThemePalette)
         If statusStrip Is Nothing Then
             Return
@@ -497,6 +501,7 @@ Public Module UiThemeManager
         e.DrawDefault = False
 
         Dim palette As UiThemePalette = palette
+        Dim fontToUse As Font = If(e.Item.Font, listView.Font)
         Dim isSelected As Boolean = e.Item.Selected
         Dim isFocused As Boolean = listView.Focused
         Dim backColor As Color = If(isSelected, If(isFocused, palette.SelectionBack, palette.SelectionBackInactive), palette.Surface)
@@ -514,7 +519,27 @@ Public Module UiThemeManager
         Dim textRect As Rectangle = e.Bounds
         textRect.Inflate(-4, 0)
 
+        Dim treeIndent As Integer = 0
+        Dim treeGlyphText As String = Nothing
         If e.ColumnIndex = 0 Then
+            Dim treeInfo As TreeListItemInfo = TryCast(e.Item.Tag, TreeListItemInfo)
+            If treeInfo IsNot Nothing Then
+                treeIndent = Math.Max(0, treeInfo.Level) * 14
+                If treeInfo.IsGroup Then
+                    treeGlyphText = If(treeInfo.IsExpanded, "[-]", "[+]")
+                End If
+            End If
+        End If
+
+        If e.ColumnIndex = 0 Then
+            Dim leftX As Integer = textRect.X + treeIndent
+            If treeGlyphText IsNot Nothing Then
+                Dim glyphSize As Size = TextRenderer.MeasureText(e.Graphics, treeGlyphText, fontToUse, New Size(Integer.MaxValue, Integer.MaxValue), TextFormatFlags.NoPadding)
+                Dim glyphRect As New Rectangle(leftX, e.Bounds.Top, glyphSize.Width, e.Bounds.Height)
+                TextRenderer.DrawText(e.Graphics, treeGlyphText, fontToUse, glyphRect, foreColor, TextFormatFlags.VerticalCenter Or TextFormatFlags.NoPadding)
+                leftX += glyphSize.Width + 4
+            End If
+
             Dim imageList As ImageList = listView.SmallImageList
             If imageList IsNot Nothing Then
                 Dim imageIndex As Integer = e.Item.ImageIndex
@@ -524,11 +549,13 @@ Public Module UiThemeManager
                 If imageIndex >= 0 AndAlso imageIndex < imageList.Images.Count Then
                     Dim icon As Image = imageList.Images(imageIndex)
                     Dim iconY As Integer = e.Bounds.Top + (e.Bounds.Height - icon.Height) \ 2
-                    e.Graphics.DrawImage(icon, e.Bounds.Left + 4, iconY, icon.Width, icon.Height)
-                    textRect.X += icon.Width + 6
-                    textRect.Width = Math.Max(0, textRect.Width - icon.Width - 6)
+                    e.Graphics.DrawImage(icon, leftX, iconY, icon.Width, icon.Height)
+                    leftX += icon.Width + 6
                 End If
             End If
+
+            textRect.X = leftX
+            textRect.Width = Math.Max(0, e.Bounds.Right - leftX - 4)
         End If
 
         Dim headerAlign As HorizontalAlignment = If(e.Header IsNot Nothing, e.Header.TextAlign, HorizontalAlignment.Left)
@@ -542,7 +569,7 @@ Public Module UiThemeManager
                 flags = flags Or TextFormatFlags.Left
         End Select
 
-        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, listView.Font, textRect, foreColor, flags)
+        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, fontToUse, textRect, foreColor, flags)
 
         Dim state As ListViewThemeState = Nothing
         Dim showGridLines As Boolean = listView.GridLines
@@ -557,6 +584,20 @@ Public Module UiThemeManager
             End Using
         End If
     End Sub
+
+    Public NotInheritable Class TreeListItemInfo
+        Public ReadOnly Property Key As String
+        Public ReadOnly Property Level As Integer
+        Public ReadOnly Property IsGroup As Boolean
+        Public ReadOnly Property IsExpanded As Boolean
+
+        Public Sub New(key As String, level As Integer, isGroup As Boolean, isExpanded As Boolean)
+            Me.Key = key
+            Me.Level = level
+            Me.IsGroup = isGroup
+            Me.IsExpanded = isExpanded
+        End Sub
+    End Class
 
     Private NotInheritable Class ListViewThemeState
         Public ReadOnly ShowGridLines As Boolean

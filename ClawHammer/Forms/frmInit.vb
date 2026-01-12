@@ -7,6 +7,7 @@ Public Class frmInit
     Private ReadOnly _statusLabel As Label
     Private ReadOnly _details As ListBox
     Private ReadOnly _progress As ProgressBar
+    Private ReadOnly _toolTip As ToolTip
 
     Public Sub New()
         Text = "Initializing ClawHammer"
@@ -45,6 +46,16 @@ Public Class frmInit
         Controls.Add(_details)
         Controls.Add(_progress)
         Controls.Add(_statusLabel)
+
+        _toolTip = New ToolTip() With {
+            .AutoPopDelay = 12000,
+            .InitialDelay = 500,
+            .ReshowDelay = 150,
+            .ShowAlways = True
+        }
+        _toolTip.SetToolTip(_statusLabel, "Current initialization step.")
+        _toolTip.SetToolTip(_progress, "Initialization progress indicator.")
+        _toolTip.SetToolTip(_details, "Detailed startup messages.")
 
         UiThemeManager.ApplyTheme(Me)
     End Sub

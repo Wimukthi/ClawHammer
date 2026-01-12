@@ -42,6 +42,7 @@ Partial Class frmMain
         LblActiveThreads = New ToolStripStatusLabel()
         cputemp = New ToolStripStatusLabel()
         lblusage = New ToolStripStatusLabel()
+        lblValidation = New ToolStripStatusLabel()
         progCPUUsage = New ToolStripProgressBar()
         clawMenu = New MenuStrip()
         FileToolStripMenuItem = New ToolStripMenuItem()
@@ -54,13 +55,15 @@ Partial Class frmMain
         LoadProfileToolStripMenuItem = New ToolStripMenuItem()
         SystemInfoToolStripMenuItem = New ToolStripMenuItem()
         ExportReportToolStripMenuItem = New ToolStripMenuItem()
-        CheckLhmUpdatesToolStripMenuItem = New ToolStripMenuItem()
         HelpToolStripMenuItem = New ToolStripMenuItem()
+        CheckForUpdatesToolStripMenuItem = New ToolStripMenuItem()
         AboutToolStripMenuItem = New ToolStripMenuItem()
         SplitContainer1 = New SplitContainer()
         lstvCoreTemps = New ListView()
         clmcore = New ColumnHeader()
         clmCoreTemp = New ColumnHeader()
+        clmCoreMin = New ColumnHeader()
+        clmCoreMax = New ColumnHeader()
         imgcpu = New ImageList(components)
         grpClawHammer.SuspendLayout()
         CType(NumThreads, ComponentModel.ISupportInitialize).BeginInit()
@@ -96,7 +99,7 @@ Partial Class frmMain
         ' Label1
         ' 
         Label1.AutoSize = True
-        Label1.Location = New Point(380, 21)
+        Label1.Location = New Point(417, 21)
         Label1.Name = "Label1"
         Label1.Size = New Size(55, 13)
         Label1.TabIndex = 7
@@ -125,7 +128,7 @@ Partial Class frmMain
         cmbStressType.FormattingEnabled = True
         cmbStressType.Location = New Point(253, 18)
         cmbStressType.Name = "cmbStressType"
-        cmbStressType.Size = New Size(121, 21)
+        cmbStressType.Size = New Size(158, 21)
         cmbStressType.TabIndex = 6
         ' 
         ' chkSaveLog
@@ -215,7 +218,7 @@ Partial Class frmMain
         ' 
         ' StStatus
         ' 
-        StStatus.Items.AddRange(New ToolStripItem() {lblcores, lblProcessorCount, LblActiveThreads, cputemp, lblusage, progCPUUsage})
+        StStatus.Items.AddRange(New ToolStripItem() {lblcores, lblProcessorCount, LblActiveThreads, cputemp, lblusage, progCPUUsage, lblValidation})
         StStatus.Location = New Point(0, 870)
         StStatus.Name = "StStatus"
         StStatus.Size = New Size(1292, 24)
@@ -258,6 +261,15 @@ Partial Class frmMain
         lblusage.Name = "lblusage"
         lblusage.Size = New Size(100, 19)
         ' 
+        ' lblValidation
+        ' 
+        lblValidation.AutoSize = False
+        lblValidation.BorderSides = ToolStripStatusLabelBorderSides.Left Or ToolStripStatusLabelBorderSides.Top Or ToolStripStatusLabelBorderSides.Right Or ToolStripStatusLabelBorderSides.Bottom
+        lblValidation.BorderStyle = Border3DStyle.SunkenOuter
+        lblValidation.Name = "lblValidation"
+        lblValidation.Size = New Size(150, 19)
+        lblValidation.Text = "Validation: Off"
+        ' 
         ' progCPUUsage
         ' 
         progCPUUsage.Name = "progCPUUsage"
@@ -290,7 +302,7 @@ Partial Class frmMain
         ' 
         ' ToolsToolStripMenuItem
         ' 
-        ToolsToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {RunOptionsToolStripMenuItem, TemperaturePlotToolStripMenuItem, CoreAffinityToolStripMenuItem, SaveProfileToolStripMenuItem, LoadProfileToolStripMenuItem, SystemInfoToolStripMenuItem, ExportReportToolStripMenuItem, CheckLhmUpdatesToolStripMenuItem})
+        ToolsToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {RunOptionsToolStripMenuItem, TemperaturePlotToolStripMenuItem, CoreAffinityToolStripMenuItem, SaveProfileToolStripMenuItem, LoadProfileToolStripMenuItem, SystemInfoToolStripMenuItem, ExportReportToolStripMenuItem})
         ToolsToolStripMenuItem.Name = "ToolsToolStripMenuItem"
         ToolsToolStripMenuItem.Size = New Size(47, 20)
         ToolsToolStripMenuItem.Text = "&Tools"
@@ -344,19 +356,19 @@ Partial Class frmMain
         ExportReportToolStripMenuItem.Size = New Size(257, 22)
         ExportReportToolStripMenuItem.Text = "Export Report"
         ' 
-        ' CheckLhmUpdatesToolStripMenuItem
-        ' 
-        CheckLhmUpdatesToolStripMenuItem.Name = "CheckLhmUpdatesToolStripMenuItem"
-        CheckLhmUpdatesToolStripMenuItem.ShortcutKeys = Keys.Control Or Keys.Shift Or Keys.U
-        CheckLhmUpdatesToolStripMenuItem.Size = New Size(257, 22)
-        CheckLhmUpdatesToolStripMenuItem.Text = "Check LHM Updates"
-        ' 
         ' HelpToolStripMenuItem
         ' 
-        HelpToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {AboutToolStripMenuItem})
+        HelpToolStripMenuItem.DropDownItems.AddRange(New ToolStripItem() {CheckForUpdatesToolStripMenuItem, AboutToolStripMenuItem})
         HelpToolStripMenuItem.Name = "HelpToolStripMenuItem"
         HelpToolStripMenuItem.Size = New Size(44, 20)
         HelpToolStripMenuItem.Text = "&Help"
+        ' 
+        ' CheckForUpdatesToolStripMenuItem
+        ' 
+        CheckForUpdatesToolStripMenuItem.Name = "CheckForUpdatesToolStripMenuItem"
+        CheckForUpdatesToolStripMenuItem.ShortcutKeys = Keys.Control Or Keys.Shift Or Keys.U
+        CheckForUpdatesToolStripMenuItem.Size = New Size(197, 22)
+        CheckForUpdatesToolStripMenuItem.Text = "Check for Updates"
         ' 
         ' AboutToolStripMenuItem
         ' 
@@ -387,7 +399,7 @@ Partial Class frmMain
         ' 
         lstvCoreTemps.BackColor = Color.WhiteSmoke
         lstvCoreTemps.BorderStyle = BorderStyle.None
-        lstvCoreTemps.Columns.AddRange(New ColumnHeader() {clmcore, clmCoreTemp})
+        lstvCoreTemps.Columns.AddRange(New ColumnHeader() {clmcore, clmCoreTemp, clmCoreMin, clmCoreMax})
         lstvCoreTemps.Dock = DockStyle.Fill
         lstvCoreTemps.GridLines = True
         lstvCoreTemps.Location = New Point(0, 0)
@@ -404,8 +416,18 @@ Partial Class frmMain
         ' 
         ' clmCoreTemp
         ' 
-        clmCoreTemp.Text = "Temperature"
-        clmCoreTemp.Width = 100
+        clmCoreTemp.Text = "Value"
+        clmCoreTemp.Width = 90
+        ' 
+        ' clmCoreMin
+        ' 
+        clmCoreMin.Text = "Min"
+        clmCoreMin.Width = 80
+        ' 
+        ' clmCoreMax
+        ' 
+        clmCoreMax.Text = "Max"
+        clmCoreMax.Width = 80
         ' 
         ' imgcpu
         ' 
@@ -416,8 +438,8 @@ Partial Class frmMain
         ' 
         ' frmMain
         ' 
-        AutoScaleDimensions = New SizeF(6F, 13F)
-        AutoScaleMode = AutoScaleMode.Font
+        AutoScaleDimensions = New SizeF(96F, 96F)
+        AutoScaleMode = AutoScaleMode.Dpi
         ClientSize = New Size(1292, 894)
         Controls.Add(SplitContainer1)
         Controls.Add(StStatus)
@@ -466,17 +488,20 @@ Partial Class frmMain
     Friend WithEvents LoadProfileToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents SystemInfoToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents ExportReportToolStripMenuItem As ToolStripMenuItem
-    Friend WithEvents CheckLhmUpdatesToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents HelpToolStripMenuItem As System.Windows.Forms.ToolStripMenuItem
+    Friend WithEvents CheckForUpdatesToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents AboutToolStripMenuItem As System.Windows.Forms.ToolStripMenuItem
     Friend WithEvents lblProcessorCount As System.Windows.Forms.ToolStripStatusLabel
     Friend WithEvents lblusage As System.Windows.Forms.ToolStripStatusLabel
+    Friend WithEvents lblValidation As System.Windows.Forms.ToolStripStatusLabel
     Friend WithEvents progCPUUsage As System.Windows.Forms.ToolStripProgressBar
     Friend WithEvents chkSaveLog As System.Windows.Forms.CheckBox
     Friend WithEvents cputemp As ToolStripStatusLabel
     Friend WithEvents lblcores As ToolStripStatusLabel
     Friend WithEvents SplitContainer1 As SplitContainer
     Friend WithEvents lstvCoreTemps As ListView
+    Friend WithEvents clmCoreMin As ColumnHeader
+    Friend WithEvents clmCoreMax As ColumnHeader
     Friend WithEvents clmcore As ColumnHeader
     Friend WithEvents clmCoreTemp As ColumnHeader
     Friend WithEvents imgcpu As ImageList

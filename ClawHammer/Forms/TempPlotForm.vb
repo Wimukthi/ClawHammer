@@ -10,12 +10,16 @@ Friend Class TempPlotForm
     Private ReadOnly _sensorIndex As Dictionary(Of String, Integer)
     Private ReadOnly _snapshotValues As Dictionary(Of String, Single)
     Private ReadOnly _sensorColors As Dictionary(Of String, Color)
+    Private ReadOnly _persistedSelection As HashSet(Of String)
     Private ReadOnly _timeWindowBox As NumericUpDown
     Private ReadOnly _refreshTimer As Timer
     Private ReadOnly _split As SplitContainer
+    Private ReadOnly _toolTip As ToolTip
     Private _colorIndex As Integer
     Private _plotDirty As Integer = 0
     Private _suppressTimeWindowEvent As Boolean = False
+    Private _suppressSensorEvents As Boolean = False
+    Private _selectionSet As Boolean = False
     Private _pendingSplitterDistance As Integer = -1
     Private ReadOnly _palette As UiThemePalette
     Private ReadOnly _plotPalette As PlotPalette
@@ -36,6 +40,8 @@ Friend Class TempPlotForm
     Public Event TimeWindowChanged As Action(Of Single)
 
     Public Sub New()
+        AutoScaleMode = AutoScaleMode.Dpi
+        AutoScaleDimensions = New SizeF(96.0F, 96.0F)
         Text = "Temperature Plot"
         StartPosition = FormStartPosition.CenterParent
         Size = New Size(900, 600)
@@ -52,6 +58,13 @@ Friend Class TempPlotForm
         _sensorIndex = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
         _snapshotValues = New Dictionary(Of String, Single)(StringComparer.OrdinalIgnoreCase)
         _sensorColors = New Dictionary(Of String, Color)(StringComparer.OrdinalIgnoreCase)
+        _persistedSelection = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        _toolTip = New ToolTip() With {
+            .AutoPopDelay = 12000,
+            .InitialDelay = 500,
+            .ReshowDelay = 150,
+            .ShowAlways = True
+        }
 
         _split = New SplitContainer()
         _split.Dock = DockStyle.Fill
@@ -59,6 +72,36 @@ Friend Class TempPlotForm
         _split.BackColor = _palette.Border
         _split.Panel1.BackColor = _palette.Panel
         _split.Panel2.BackColor = _palette.Background
+
+        Dim sensorToolbar As New FlowLayoutPanel()
+        sensorToolbar.Dock = DockStyle.Top
+        sensorToolbar.Height = 32
+        sensorToolbar.Padding = New Padding(8, 5, 8, 4)
+        sensorToolbar.BackColor = _palette.Panel
+        sensorToolbar.WrapContents = False
+        sensorToolbar.AutoSize = False
+
+        Dim btnSelectAll As New Button() With {.Text = "Select All", .AutoSize = True, .AutoSizeMode = AutoSizeMode.GrowAndShrink, .Margin = New Padding(0, 0, 8, 0), .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
+        btnSelectAll.FlatAppearance.BorderColor = _palette.Border
+        btnSelectAll.FlatAppearance.BorderSize = 1
+        _toolTip.SetToolTip(btnSelectAll, "Enable all sensors in the plot.")
+        AddHandler btnSelectAll.Click, Sub() SetAllSensorsChecked(True)
+
+        Dim btnDeselectAll As New Button() With {.Text = "Deselect All", .AutoSize = True, .AutoSizeMode = AutoSizeMode.GrowAndShrink, .Margin = New Padding(0, 0, 8, 0), .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
+        btnDeselectAll.FlatAppearance.BorderColor = _palette.Border
+        btnDeselectAll.FlatAppearance.BorderSize = 1
+        _toolTip.SetToolTip(btnDeselectAll, "Disable all sensors in the plot.")
+        AddHandler btnDeselectAll.Click, Sub() SetAllSensorsChecked(False)
+
+        Dim btnReset As New Button() With {.Text = "Reset Selection", .AutoSize = True, .AutoSizeMode = AutoSizeMode.GrowAndShrink, .Margin = New Padding(0, 0, 8, 0), .BackColor = _palette.Surface, .ForeColor = _palette.Text, .FlatStyle = FlatStyle.Flat}
+        btnReset.FlatAppearance.BorderColor = _palette.Border
+        btnReset.FlatAppearance.BorderSize = 1
+        _toolTip.SetToolTip(btnReset, "Reset to the default sensor selection.")
+        AddHandler btnReset.Click, Sub() ResetSensorSelection()
+
+        sensorToolbar.Controls.Add(btnSelectAll)
+        sensorToolbar.Controls.Add(btnDeselectAll)
+        sensorToolbar.Controls.Add(btnReset)
 
         _sensorList = New CheckedListBox()
         _sensorList.Dock = DockStyle.Fill
@@ -69,7 +112,9 @@ Friend Class TempPlotForm
         _sensorList.BorderStyle = BorderStyle.FixedSingle
         _sensorList.DrawMode = DrawMode.OwnerDrawFixed
         _sensorList.ItemHeight = Math.Max(18, _sensorList.Font.Height + 4)
+        _toolTip.SetToolTip(_sensorList, "Select which sensors to plot." & vbCrLf & "Selections persist between runs.")
         _split.Panel1.Controls.Add(_sensorList)
+        _split.Panel1.Controls.Add(sensorToolbar)
 
         _plot = New TemperaturePlotControl()
         _plot.Dock = DockStyle.Fill
@@ -84,6 +129,8 @@ Friend Class TempPlotForm
 
         Dim lblWindow As New Label() With {.Text = "Time window (sec)", .AutoSize = True, .ForeColor = _palette.Text, .Margin = New Padding(0, 4, 8, 0)}
         _timeWindowBox = New NumericUpDown() With {.Minimum = 10, .Maximum = 3600, .Increment = 10, .Value = 120, .Width = 80, .BackColor = _palette.Surface, .ForeColor = _palette.Text, .Margin = New Padding(0, 0, 8, 0)}
+        _toolTip.SetToolTip(lblWindow, "Duration shown in the plot.")
+        _toolTip.SetToolTip(_timeWindowBox, "Seconds displayed in the chart window.")
         AddHandler _timeWindowBox.ValueChanged, Sub()
                                                     Dim seconds As Single = CSng(_timeWindowBox.Value)
                                                     _plot.TimeWindowSeconds = seconds
@@ -97,6 +144,7 @@ Friend Class TempPlotForm
 
         _split.Panel2.Controls.Add(_plot)
         _split.Panel2.Controls.Add(plotToolbar)
+        _toolTip.SetToolTip(_plot, "Live temperature plot for the selected sensors.")
 
         Controls.Add(_split)
 
@@ -126,7 +174,8 @@ Friend Class TempPlotForm
         End If
 
         UiLayoutManager.ApplyWindowLayout(Me, layout)
-        _pendingSplitterDistance = layout.SplitterDistance
+        Dim scale As Single = UiLayoutManager.GetLayoutScaleFactor(Me, layout)
+        _pendingSplitterDistance = UiLayoutManager.ScaleLayoutValue(layout.SplitterDistance, scale)
     End Sub
 
     Public Sub CaptureLayout(layout As UiWindowLayout)
@@ -161,9 +210,110 @@ Friend Class TempPlotForm
     End Sub
 
     Private Sub SensorList_ItemCheck(sender As Object, e As ItemCheckEventArgs)
+        If _suppressSensorEvents Then
+            Return
+        End If
         Dim label As String = _sensorList.Items(e.Index).ToString()
         Dim enabled As Boolean = (e.NewValue = CheckState.Checked)
+        _selectionSet = True
+        If enabled Then
+            _persistedSelection.Add(label)
+        Else
+            _persistedSelection.Remove(label)
+        End If
         _plot.SetSeriesEnabled(label, enabled)
+    End Sub
+
+    Private Sub SetAllSensorsChecked(checked As Boolean)
+        If _sensorList.Items.Count = 0 Then
+            Return
+        End If
+
+        _sensorList.BeginUpdate()
+        _suppressSensorEvents = True
+        Try
+            _selectionSet = True
+            _persistedSelection.Clear()
+            For i As Integer = 0 To _sensorList.Items.Count - 1
+                _sensorList.SetItemChecked(i, checked)
+                Dim label As String = _sensorList.Items(i).ToString()
+                _plot.SetSeriesEnabled(label, checked)
+                If checked Then
+                    _persistedSelection.Add(label)
+                End If
+            Next
+        Finally
+            _suppressSensorEvents = False
+            _sensorList.EndUpdate()
+        End Try
+
+        _sensorList.Invalidate()
+        _plot.Invalidate()
+    End Sub
+
+    Public Sub ResetSensorSelection()
+        _selectionSet = False
+        _persistedSelection.Clear()
+        ApplySelectionToList(False)
+    End Sub
+
+    Public Sub ApplySensorSelection(selected As IReadOnlyCollection(Of String), selectionSet As Boolean)
+        _selectionSet = selectionSet
+        _persistedSelection.Clear()
+        If selected IsNot Nothing Then
+            For Each label As String In selected
+                If Not String.IsNullOrWhiteSpace(label) Then
+                    _persistedSelection.Add(label)
+                End If
+            Next
+        End If
+        If _selectionSet Then
+            ApplySelectionToList(True)
+        End If
+    End Sub
+
+    Public ReadOnly Property SelectionSet As Boolean
+        Get
+            Return _selectionSet
+        End Get
+    End Property
+
+    Public Function GetSelectedSensors() As List(Of String)
+        Dim selected As New List(Of String)()
+        For i As Integer = 0 To _sensorList.Items.Count - 1
+            If _sensorList.GetItemChecked(i) Then
+                selected.Add(_sensorList.Items(i).ToString())
+            End If
+        Next
+        Return selected
+    End Function
+
+    Private Sub ApplySelectionToList(usePersistedSelection As Boolean)
+        If _sensorList.Items.Count = 0 Then
+            Return
+        End If
+
+        _sensorList.BeginUpdate()
+        _suppressSensorEvents = True
+        Try
+            For i As Integer = 0 To _sensorList.Items.Count - 1
+                Dim label As String = _sensorList.Items(i).ToString()
+                Dim shouldCheck As Boolean
+                If usePersistedSelection Then
+                    shouldCheck = _persistedSelection.Contains(label)
+                Else
+                    shouldCheck = IsCpuLabel(label)
+                End If
+                _sensorList.SetItemChecked(i, shouldCheck)
+                _plot.SetSeriesEnabled(label, shouldCheck)
+            Next
+        Finally
+            _suppressSensorEvents = False
+            _sensorList.EndUpdate()
+        End Try
+
+        _sensorList.Invalidate()
+        _plot.Invalidate()
     End Sub
 
     Private Sub SensorList_DrawItem(sender As Object, e As DrawItemEventArgs)
@@ -242,10 +392,12 @@ Friend Class TempPlotForm
                 _sensorIndex(sample.Label) = idx
                 _sensorColors(sample.Label) = color
                 _plot.EnsureSeries(sample.Label, color)
-                If isCpu Then
-                    _sensorList.SetItemChecked(idx, True)
-                    _plot.SetSeriesEnabled(sample.Label, True)
-                End If
+                Dim shouldEnable As Boolean = If(_selectionSet, _persistedSelection.Contains(sample.Label), isCpu)
+                Dim suppressState As Boolean = _suppressSensorEvents
+                _suppressSensorEvents = True
+                _sensorList.SetItemChecked(idx, shouldEnable)
+                _plot.SetSeriesEnabled(sample.Label, shouldEnable)
+                _suppressSensorEvents = suppressState
                 _sensorList.Invalidate()
             End If
         Next

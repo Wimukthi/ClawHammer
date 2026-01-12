@@ -1,5 +1,6 @@
-﻿
+
 Public Class frmabout
+    Private _toolTip As ToolTip
 
     Private Sub frmabout_Load(ByVal sender As System.Object, _
                               ByVal e As System.EventArgs) _
@@ -10,8 +11,19 @@ Public Class frmabout
             TextBox1.Enabled = True
             TextBox1.TabStop = False
             UiThemeManager.ApplyTheme(Me)
-            lblversion.Text = My.Application.Info.Version.ToString
-            TextBox1.Text = "Application Version : " & My.Application.Info.Version.ToString & vbCrLf & "Program Icon © David Lanham, from the Icon Pack Amora"
+            _toolTip = New ToolTip() With {
+                .AutoPopDelay = 12000,
+                .InitialDelay = 500,
+                .ReshowDelay = 150,
+                .ShowAlways = True
+            }
+            _toolTip.SetToolTip(Button1, "Close the About window.")
+            _toolTip.SetToolTip(RichTextBox1, "License and credits.")
+            _toolTip.SetToolTip(TextBox1, "Version and attribution details.")
+            _toolTip.SetToolTip(lblversion, "Current application version.")
+            _toolTip.SetToolTip(PictureBox1, "ClawHammer logo.")
+            lblversion.Text = GetAppVersionDisplay()
+            TextBox1.Text = "Application Version : " & GetAppVersionDisplay() & vbCrLf & "Program Icon � David Lanham, from the Icon Pack Amora"
             TextBox1.DeselectAll()
 
         Catch ex As Exception
@@ -32,3 +44,5 @@ Public Class frmabout
 
     End Sub
 End Class
+
+
