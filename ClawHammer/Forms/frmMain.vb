@@ -2621,7 +2621,21 @@ Public Class frmMain
                                                                Dim runningLabel As String = BuildAffinityLabel(logicalId, topology)
                                                                LogMessage($"Thread Started ({kernelName}) {runningLabel} [Thread ID] : {Threading.Thread.CurrentThread.ManagedThreadId}")
 
-                                                               worker.Run(token, reportProgressAction, validationSettings, workerReportError, reportStatus)
+
+                                                               Try
+                                                                   worker.Run(token, reportProgressAction, validationSettings, workerReportError, reportStatus)
+                                                               Catch ex As OperationCanceledException
+                                                               Catch ex As Exception
+                                                                   Dim detail As String = ex.GetType().Name
+                                                                   If Not String.IsNullOrWhiteSpace(ex.Message) Then
+                                                                       detail &= $": {ex.Message}"
+                                                                   End If
+                                                                   Dim crashMessage As String = $"Worker crashed (W{workerId}) {runningLabel} ({kernelName}) - {detail}"
+                                                                   LogMessage(crashMessage)
+                                                                   HandleValidationStatusMessage($"STATUS|{workerId}|{kernelName}|Crashed: {detail}")
+                                                                   TriggerAutoStop("Stopping test: worker crash detected.")
+                                                               End Try
+
                                                            End If
                                                        End Sub
 

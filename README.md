@@ -10,6 +10,7 @@ and a validation loop.
 - Sensor tree via LibreHardwareMonitor (temps, clocks, voltages, throttle) with
   current/min/max columns.
 - Validation loop with per-thread status in the Validation Monitor.
+- Worker crash handling for plugin stability; crashes are logged and the run stops safely.
 - Core affinity grouped by physical core; logs show thread-to-core mapping.
 - Auto-stop on temperature or throttling, timed runs, UI snappy mode, and core affinity.
 - CSV telemetry logging and temperature plot with persistent selection and refresh rate.
@@ -50,6 +51,10 @@ and a validation loop.
 - UI layout and plot selections are saved in `ui-layout.json`.
 
 ## Version History
+### 1.3.8 (Build 128)
+- Worker crash handling to prevent app-level crashes; errors are logged and validation updates.
+- Core affinity limits workers to the selected logical threads.
+
 ### 1.3.8 (Build 125)
 - Plugin architecture with Plugin Manager and SDK (VB/C# samples and templates).
 - Sensor tree view with min/max columns, plus temperature plot refresh control.
