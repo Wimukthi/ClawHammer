@@ -9,6 +9,14 @@ Public Module ThreadAffinity
     Private Function SetThreadAffinityMask(hThread As IntPtr, dwThreadAffinityMask As UIntPtr) As UIntPtr
     End Function
 
+    <DllImport("kernel32.dll")>
+    Private Function GetCurrentProcessorNumber() As UInteger
+    End Function
+
+    Public Function GetCurrentLogicalProcessor() As Integer
+        Return CInt(GetCurrentProcessorNumber())
+    End Function
+
     Public Function TrySetCurrentThreadAffinity(coreIndex As Integer) As Boolean
         If coreIndex < 0 Then
             Return False

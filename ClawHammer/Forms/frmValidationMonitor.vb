@@ -1,4 +1,4 @@
-﻿Imports System
+Imports System
 Imports System.Collections.Generic
 Imports System.Drawing
 Imports System.Windows.Forms
@@ -6,6 +6,7 @@ Imports System.Windows.Forms
 Friend Class ValidationStatusSnapshot
     Public Property WorkerId As Integer
     Public Property Kernel As String
+    Public Property AffinityLabel As String
     Public Property Detail As String
     Public Property UpdatedUtc As DateTime
 End Class
@@ -34,9 +35,10 @@ Friend Class frmValidationMonitor
             .HideSelection = False,
             .BorderStyle = BorderStyle.FixedSingle
         }
-        _list.Columns.Add("Worker", 80)
-        _list.Columns.Add("Kernel", 170)
-        _list.Columns.Add("Status", 320)
+        _list.Columns.Add("Worker", 70)
+        _list.Columns.Add("Core/LP", 120)
+        _list.Columns.Add("Kernel", 160)
+        _list.Columns.Add("Status", 300)
         _list.Columns.Add("Updated", 90)
 
         _toolTip = New ToolTip() With {
@@ -67,6 +69,7 @@ Friend Class frmValidationMonitor
         If statuses IsNot Nothing Then
             For Each entry As ValidationStatusSnapshot In statuses
                 Dim item As New ListViewItem($"W{entry.WorkerId}")
+                item.SubItems.Add(If(entry.AffinityLabel, String.Empty))
                 item.SubItems.Add(If(entry.Kernel, String.Empty))
                 item.SubItems.Add(If(entry.Detail, String.Empty))
 

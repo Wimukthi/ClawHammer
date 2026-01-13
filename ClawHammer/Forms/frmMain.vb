@@ -126,6 +126,9 @@ Public Class frmMain
     Private ReadOnly _validationStatusLock As New Object()
     Private _validationSummarySuffix As String = String.Empty
     Private _validationMonitor As frmValidationMonitor
+    Private ReadOnly _workerAffinityMap As New Dictionary(Of Integer, WorkerAffinityInfo)()
+    Private ReadOnly _workerAffinityLock As New Object()
+    Private _cpuTopology As CpuTopologySnapshot
     Private _toolTipMain As ToolTip
     Private _sensorAccessWarningLogged As Integer = 0
 
@@ -184,6 +187,15 @@ Public Class frmMain
             Me.ValueFormat = valueFormat
         End Sub
     End Structure
+
+    Private Class WorkerAffinityInfo
+        Public Property WorkerId As Integer
+        Public Property LogicalId As Integer?
+        Public Property CoreId As Integer?
+        Public Property CoreLabel As String
+        Public Property AffinityLabel As String
+    End Class
+
 
     Private Structure SensorMinMax
         Public Min As Single
@@ -1288,6 +1300,8 @@ Public Class frmMain
             InitializeProfiles()
             initForm.AddDetail($"Active profile: {_currentProfileName}.")
             ClearValidationStatus()
+            ClearWorkerAffinityMap()
+
             InitializeToolTips()
 
             LogMessage("ClawHammer Startup Successful")
@@ -1364,12 +1378,14 @@ Public Class frmMain
             If Integer.TryParse(parts(1), workerId) Then
                 Dim kernel As String = parts(2)
                 Dim detail As String = parts(3)
+                Dim affinityLabel As String = GetWorkerAffinityLabel(workerId)
                 Dim snapshot As List(Of ValidationStatusSnapshot) = Nothing
 
                 SyncLock _validationStatusLock
                     _validationStatusByWorker(workerId) = New ValidationStatusSnapshot With {
                         .WorkerId = workerId,
                         .Kernel = kernel,
+                        .AffinityLabel = affinityLabel,
                         .Detail = detail,
                         .UpdatedUtc = DateTime.UtcNow
                     }
@@ -1379,6 +1395,7 @@ Public Class frmMain
                         snapshot.Add(New ValidationStatusSnapshot With {
                             .WorkerId = entry.WorkerId,
                             .Kernel = entry.Kernel,
+                            .AffinityLabel = entry.AffinityLabel,
                             .Detail = entry.Detail,
                             .UpdatedUtc = entry.UpdatedUtc
                         })
@@ -1410,6 +1427,7 @@ Public Class frmMain
                 snapshot.Add(New ValidationStatusSnapshot With {
                     .WorkerId = entry.WorkerId,
                     .Kernel = entry.Kernel,
+                    .AffinityLabel = entry.AffinityLabel,
                     .Detail = entry.Detail,
                     .UpdatedUtc = entry.UpdatedUtc
                 })
@@ -1470,7 +1488,8 @@ Public Class frmMain
         For i As Integer = 0 To count - 1
             Dim entry As ValidationStatusSnapshot = entries(i)
             Dim timeText As String = entry.UpdatedUtc.ToLocalTime().ToString("HH:mm:ss")
-            lines.Add($"W{entry.WorkerId} {entry.Kernel}: {entry.Detail} ({timeText})")
+            Dim affinityText As String = If(String.IsNullOrWhiteSpace(entry.AffinityLabel), String.Empty, $" {entry.AffinityLabel}")
+            lines.Add($"W{entry.WorkerId}{affinityText} {entry.Kernel}: {entry.Detail} ({timeText})")
         Next
         If entries.Count > maxLines Then
             lines.Add($"+{entries.Count - maxLines} more...")
@@ -2521,34 +2540,13 @@ Public Class frmMain
         _pluginRegistry.PrimeRangeMax = MaxValuePrime
         StartValidation(True)
         Dim validationSettings As ValidationSettings = _validationSettings
-        Dim reportError As Action(Of String) = Sub(message)
-                                                   LogMessage(message)
-                                                   UpdateValidationDisplay()
-                                                   TriggerAutoStop(message)
-                                               End Sub
         Dim reportStatus As Action(Of String) = Sub(message)
                                                     HandleValidationStatusMessage(message)
                                                 End Sub
 
         ClearValidationStatus()
-
-        Dim threadCount As Integer = GetEffectiveThreadCount()
-        If _runOptions.UiSnappyMode AndAlso threadCount < NumThreads.Value Then
-            LogMessage($"UI snappy mode enabled. Threads reduced to {threadCount}.")
-        End If
-
-        Dim context As StressPluginContext = _pluginRegistry.CreateContext(threadCount)
-        If String.Equals(selectedPluginId, DefaultPluginIds.Avx, StringComparison.OrdinalIgnoreCase) AndAlso Not context.AvxSupported Then
-            LogMessage("AVX selected but SIMD acceleration is not available. Falling back to Floating Point.")
-            selectedPluginId = DefaultPluginIds.FloatingPoint
-            SetSelectedStressPlugin(selectedPluginId)
-            _pluginRegistry.TryGetPlugin(selectedPluginId, selectedPlugin)
-        End If
-
-        If selectedPlugin Is Nothing Then
-            StopStressTest("No stress plugin available to start the run.")
-            Return
-        End If
+        ClearWorkerAffinityMap()
+        Dim topology As CpuTopologySnapshot = GetCpuTopology()
 
         Dim affinityCores As New List(Of Integer)()
         Dim useAffinity As Boolean = _runOptions.UseAffinity AndAlso _runOptions.AffinityCores IsNot Nothing
@@ -2564,20 +2562,53 @@ Public Class frmMain
             End If
         End If
 
+        Dim threadCount As Integer = GetEffectiveThreadCount()
+        If _runOptions.UiSnappyMode AndAlso threadCount < NumThreads.Value Then
+            LogMessage($"UI snappy mode enabled. Threads reduced to {threadCount}.")
+        End If
+
+        If useAffinity AndAlso affinityCores.Count > 0 AndAlso threadCount > affinityCores.Count Then
+            Dim requestedThreads As Integer = threadCount
+            threadCount = affinityCores.Count
+            LogMessage($"Core affinity selected {affinityCores.Count} logical thread(s); limiting worker threads from {requestedThreads} to {threadCount}.")
+        End If
+
+        Dim context As StressPluginContext = _pluginRegistry.CreateContext(threadCount)
+        If String.Equals(selectedPluginId, DefaultPluginIds.Avx, StringComparison.OrdinalIgnoreCase) AndAlso Not context.AvxSupported Then
+            LogMessage("AVX selected but SIMD acceleration is not available. Falling back to Floating Point.")
+            selectedPluginId = DefaultPluginIds.FloatingPoint
+            SetSelectedStressPlugin(selectedPluginId)
+            _pluginRegistry.TryGetPlugin(selectedPluginId, selectedPlugin)
+        End If
+
+        If selectedPlugin Is Nothing Then
+            StopStressTest("No stress plugin available to start the run.")
+            Return
+        End If
+
         Dim baseSeed As ULong = BitConverter.ToUInt64(BitConverter.GetBytes(Environment.TickCount64), 0) Xor &H9E3779B97F4A7C15UL
 
         For i = 0 To threadCount - 1
             Dim reportProgressAction As Action(Of Integer) = Sub(ops) Interlocked.Add(_operationsCompleted, ops)
 
+            Dim workerId As Integer = i
             Dim coreIndex As Integer? = Nothing
             If useAffinity Then
                 coreIndex = affinityCores(i Mod affinityCores.Count)
             End If
 
+            SetWorkerAffinity(workerId, coreIndex, topology)
+
             Dim indexSeed As ULong = CULng(i)
             Dim workerSeed As ULong = baseSeed Xor (indexSeed << 1) Xor (indexSeed << 33) Xor (indexSeed << 47)
             Dim worker As IStressWorker = selectedPlugin.CreateWorker(i, workerSeed, context)
             Dim kernelName As String = If(worker IsNot Nothing, worker.KernelName, selectedPlugin.DisplayName)
+            Dim workerReportError As Action(Of String) = Sub(message)
+                                                             Dim decorated As String = DecorateWorkerMessage(workerId, message)
+                                                             LogMessage(decorated)
+                                                             UpdateValidationDisplay()
+                                                             TriggerAutoStop(decorated)
+                                                         End Sub
 
             Dim threadStart As Threading.ThreadStart = Sub()
                                                            If coreIndex.HasValue Then
@@ -2586,7 +2617,11 @@ Public Class frmMain
                                                                End If
                                                            End If
                                                            If worker IsNot Nothing Then
-                                                               worker.Run(token, reportProgressAction, validationSettings, reportError, reportStatus)
+                                                               Dim logicalId As Integer = ThreadAffinity.GetCurrentLogicalProcessor()
+                                                               Dim runningLabel As String = BuildAffinityLabel(logicalId, topology)
+                                                               LogMessage($"Thread Started ({kernelName}) {runningLabel} [Thread ID] : {Threading.Thread.CurrentThread.ManagedThreadId}")
+
+                                                               worker.Run(token, reportProgressAction, validationSettings, workerReportError, reportStatus)
                                                            End If
                                                        End Sub
 
@@ -2608,9 +2643,6 @@ Public Class frmMain
 
             t.IsBackground = True
             t.Start()
-
-            Dim affinityInfo As String = If(coreIndex.HasValue, $" Core {coreIndex.Value}", String.Empty)
-            LogMessage($"Thread Created ({kernelName}){affinityInfo} [Thread ID] : {t.ManagedThreadId}")
         Next
 
         UpdateActiveThreadCount()
@@ -2663,6 +2695,7 @@ Public Class frmMain
             btnStart.Text = "Start"
             btnStart.Image = My.Resources.arrow_right_3
             ClearValidationStatus()
+            ClearWorkerAffinityMap()
 
         Finally
             Interlocked.Exchange(_stopInProgress, 0)
@@ -3434,10 +3467,10 @@ Public Class frmMain
             Dim lblAffinity As New Label() With {.AutoSize = True, .Location = New Point(leftLabel, row)}
             tip.SetToolTip(lblAffinity, "Summary of selected cores.")
             Dim updateAffinityLabel As Action = Sub()
-                                                    If selectedCores.Count = 0 Then
+                                                    If Not chkAffinity.Checked OrElse selectedCores.Count = 0 Then
                                                         lblAffinity.Text = "Selected cores: All"
                                                     Else
-                                                        lblAffinity.Text = $"Selected cores: {selectedCores.Count}"
+                                                        lblAffinity.Text = GetAffinitySummary(selectedCores)
                                                     End If
                                                 End Sub
             updateAffinityLabel()
@@ -3481,7 +3514,177 @@ Public Class frmMain
     Private Function ShowCoreSelectionDialog(current As List(Of Integer)) As List(Of Integer)
         Dim selected As New List(Of Integer)(current)
         Dim maxSelectable As Integer = Math.Min(Environment.ProcessorCount, If(IntPtr.Size = 8, 64, 32))
+        Dim topology As CpuTopologySnapshot = GetCpuTopology()
 
+        If topology Is Nothing OrElse Not topology.IsValid Then
+            Return ShowCoreSelectionDialogLegacy(selected, maxSelectable)
+        End If
+
+        Using dlg As New Form()
+            dlg.Text = "Core Affinity"
+            dlg.FormBorderStyle = FormBorderStyle.FixedDialog
+            dlg.StartPosition = FormStartPosition.CenterParent
+            dlg.MaximizeBox = False
+            dlg.MinimizeBox = False
+            dlg.ShowInTaskbar = False
+            dlg.ClientSize = New Size(420, 420)
+            dlg.MinimumSize = New Size(420, 420)
+
+            Dim tip As New ToolTip() With {
+                .AutoPopDelay = 12000,
+                .InitialDelay = 500,
+                .ReshowDelay = 150,
+                .ShowAlways = True
+            }
+
+            Dim root As New TableLayoutPanel() With {
+                .Dock = DockStyle.Fill,
+                .ColumnCount = 1,
+                .RowCount = 5,
+                .Padding = New Padding(12)
+            }
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            root.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            root.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+
+            Dim lblInfo As New Label() With {.AutoSize = True, .Text = "Logical threads grouped by physical core."}
+            root.Controls.Add(lblInfo, 0, 0)
+
+            Dim tree As New TreeView() With {
+                .CheckBoxes = True,
+                .Dock = DockStyle.Fill,
+                .HideSelection = False,
+                .FullRowSelect = True
+            }
+            tip.SetToolTip(tree, "Select logical threads or entire cores to pin worker threads.")
+
+            Dim updating As Boolean = False
+            Dim updateSummary As Action(Of Label) = Sub(summary)
+                                                        Dim logicalSelected As Integer = 0
+                                                        Dim coreSelected As Integer = 0
+                                                        For Each coreNode As TreeNode In tree.Nodes
+                                                            Dim coreHasSelection As Boolean = False
+                                                            For Each child As TreeNode In coreNode.Nodes
+                                                                If child.Checked Then
+                                                                    logicalSelected += 1
+                                                                    coreHasSelection = True
+                                                                End If
+                                                            Next
+                                                            If coreHasSelection Then
+                                                                coreSelected += 1
+                                                            End If
+                                                        Next
+                                                        summary.Text = $"Selected cores: {coreSelected}, logical threads: {logicalSelected}"
+                                                    End Sub
+
+            For Each core As PhysicalCoreInfo In topology.PhysicalCores
+                Dim coreLabel As String = GetCoreDisplayLabel(core, topology)
+                Dim coreNode As New TreeNode(coreLabel) With {.Tag = core}
+                For Each logicalId As Integer In core.LogicalProcessors
+                    If logicalId >= maxSelectable Then
+                        Continue For
+                    End If
+                    Dim child As New TreeNode($"LP {logicalId}") With {.Tag = logicalId}
+                    If selected.Contains(logicalId) Then
+                        child.Checked = True
+                    End If
+                    coreNode.Nodes.Add(child)
+                Next
+
+                Dim allChecked As Boolean = True
+                For Each child As TreeNode In coreNode.Nodes
+                    If Not child.Checked Then
+                        allChecked = False
+                        Exit For
+                    End If
+                Next
+                coreNode.Checked = allChecked AndAlso coreNode.Nodes.Count > 0
+                coreNode.Expand()
+                tree.Nodes.Add(coreNode)
+            Next
+
+            AddHandler tree.AfterCheck, Sub(sender, e)
+                                            If updating Then
+                                                Return
+                                            End If
+                                            updating = True
+                                            Try
+                                                If e.Node.Level = 0 Then
+                                                    For Each child As TreeNode In e.Node.Nodes
+                                                        child.Checked = e.Node.Checked
+                                                    Next
+                                                Else
+                                                    Dim parent As TreeNode = e.Node.Parent
+                                                    If parent IsNot Nothing Then
+                                                        Dim allChecked As Boolean = True
+                                                        For Each child As TreeNode In parent.Nodes
+                                                            If Not child.Checked Then
+                                                                allChecked = False
+                                                                Exit For
+                                                            End If
+                                                        Next
+                                                        parent.Checked = allChecked
+                                                    End If
+                                                End If
+                                            Finally
+                                                updating = False
+                                            End Try
+                                        End Sub
+
+            root.Controls.Add(tree, 0, 1)
+
+            Dim lblSummary As New Label() With {.AutoSize = True}
+            updateSummary(lblSummary)
+            AddHandler tree.AfterCheck, Sub() updateSummary(lblSummary)
+            root.Controls.Add(lblSummary, 0, 2)
+
+            Dim noteText As String = $"Showing logical processors 0-{maxSelectable - 1}."
+            If Not String.IsNullOrWhiteSpace(topology.Warning) Then
+                noteText &= " " & topology.Warning
+            End If
+            Dim lblNote As New Label() With {.AutoSize = True, .Text = noteText}
+            root.Controls.Add(lblNote, 0, 3)
+
+            Dim buttonPanel As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Bottom,
+                .FlowDirection = FlowDirection.RightToLeft,
+                .Padding = New Padding(0, 8, 0, 0),
+                .AutoSize = True
+            }
+            Dim btnOk As New Button() With {.Text = "OK", .DialogResult = DialogResult.OK, .Width = 80}
+            Dim btnCancel As New Button() With {.Text = "Cancel", .DialogResult = DialogResult.Cancel, .Width = 80}
+            tip.SetToolTip(btnOk, "Apply core selection.")
+            tip.SetToolTip(btnCancel, "Keep current selection.")
+            buttonPanel.Controls.Add(btnCancel)
+            buttonPanel.Controls.Add(btnOk)
+            root.Controls.Add(buttonPanel, 0, 4)
+
+            dlg.Controls.Add(root)
+            dlg.AcceptButton = btnOk
+            dlg.CancelButton = btnCancel
+
+            ApplyCoreSelectionTheme(dlg, tree)
+
+            If dlg.ShowDialog(Me) <> DialogResult.OK Then
+                Return selected
+            End If
+
+            selected.Clear()
+            For Each coreNode As TreeNode In tree.Nodes
+                For Each child As TreeNode In coreNode.Nodes
+                    If child.Checked AndAlso TypeOf child.Tag Is Integer Then
+                        selected.Add(CInt(child.Tag))
+                    End If
+                Next
+            Next
+        End Using
+
+        Return selected
+    End Function
+
+    Private Function ShowCoreSelectionDialogLegacy(selected As List(Of Integer), maxSelectable As Integer) As List(Of Integer)
         Using dlg As New Form()
             dlg.Text = "Core Affinity"
             dlg.FormBorderStyle = FormBorderStyle.FixedDialog
@@ -3534,6 +3737,138 @@ Public Class frmMain
         Return selected
     End Function
 
+    Private Sub ApplyCoreSelectionTheme(dialog As Form, tree As TreeView)
+        If dialog Is Nothing Then
+            Return
+        End If
+
+        UiThemeManager.ApplyTheme(dialog)
+
+        If tree Is Nothing Then
+            Return
+        End If
+
+        Dim palette As UiThemePalette = UiThemeManager.Palette
+        tree.BackColor = palette.Surface
+        tree.ForeColor = palette.Text
+    End Sub
+
+    Private Function GetAffinitySummary(selected As List(Of Integer)) As String
+        If selected Is Nothing OrElse selected.Count = 0 Then
+            Return "Selected cores: All"
+        End If
+
+        Dim topology As CpuTopologySnapshot = GetCpuTopology()
+
+        If topology Is Nothing OrElse Not topology.IsValid Then
+            Return $"Selected cores: {selected.Count}"
+        End If
+
+        Dim physicalSet As New HashSet(Of Integer)()
+        For Each logicalId As Integer In selected
+            Dim core As PhysicalCoreInfo = Nothing
+            If topology.TryGetCoreForLogical(logicalId, core) AndAlso core IsNot Nothing Then
+                physicalSet.Add(core.CoreId)
+            End If
+        Next
+
+        Dim physicalCount As Integer = physicalSet.Count
+        Return $"Selected cores: {physicalCount} ({selected.Count} threads)"
+    End Function
+
+    Private Function GetCpuTopology() As CpuTopologySnapshot
+        If _cpuTopology Is Nothing Then
+            _cpuTopology = CpuTopologyService.GetTopology()
+        End If
+        Return _cpuTopology
+    End Function
+
+    Private Function GetCoreDisplayLabel(core As PhysicalCoreInfo, topology As CpuTopologySnapshot) As String
+        If core Is Nothing Then
+            Return "Core"
+        End If
+
+        If topology IsNot Nothing AndAlso topology.HasEfficiencyClasses Then
+            Return $"Core {core.CoreId} (EC {core.EfficiencyClass})"
+        End If
+
+        Return $"Core {core.CoreId}"
+    End Function
+
+    Private Function BuildAffinityLabel(logicalId As Integer?, topology As CpuTopologySnapshot) As String
+        If Not logicalId.HasValue Then
+            Return "Unpinned"
+        End If
+
+        Dim core As PhysicalCoreInfo = Nothing
+        If topology IsNot Nothing AndAlso topology.TryGetCoreForLogical(logicalId.Value, core) AndAlso core IsNot Nothing Then
+            Dim coreLabel As String = GetCoreDisplayLabel(core, topology)
+            Return $"{coreLabel} / LP {logicalId.Value}"
+        End If
+
+        Return $"LP {logicalId.Value}"
+    End Function
+
+    Private Sub SetWorkerAffinity(workerId As Integer, logicalId As Integer?, topology As CpuTopologySnapshot)
+        Dim info As New WorkerAffinityInfo() With {
+            .WorkerId = workerId,
+            .LogicalId = logicalId,
+            .AffinityLabel = BuildAffinityLabel(logicalId, topology)
+        }
+
+        Dim core As PhysicalCoreInfo = Nothing
+        If logicalId.HasValue AndAlso topology IsNot Nothing AndAlso topology.TryGetCoreForLogical(logicalId.Value, core) AndAlso core IsNot Nothing Then
+            info.CoreId = core.CoreId
+            info.CoreLabel = GetCoreDisplayLabel(core, topology)
+        Else
+            info.CoreLabel = info.AffinityLabel
+        End If
+
+        SyncLock _workerAffinityLock
+            _workerAffinityMap(workerId) = info
+        End SyncLock
+    End Sub
+
+    Private Function GetWorkerAffinityInfo(workerId As Integer) As WorkerAffinityInfo
+        SyncLock _workerAffinityLock
+            Dim info As WorkerAffinityInfo = Nothing
+            If _workerAffinityMap.TryGetValue(workerId, info) Then
+                Return info
+            End If
+        End SyncLock
+        Return Nothing
+    End Function
+
+    Private Function GetWorkerAffinityLabel(workerId As Integer) As String
+        Dim info As WorkerAffinityInfo = GetWorkerAffinityInfo(workerId)
+        If info Is Nothing Then
+            Return String.Empty
+        End If
+        Return info.AffinityLabel
+    End Function
+
+    Private Function DecorateWorkerMessage(workerId As Integer, message As String) As String
+        If String.IsNullOrWhiteSpace(message) Then
+            Return message
+        End If
+
+        Dim info As WorkerAffinityInfo = GetWorkerAffinityInfo(workerId)
+        If info Is Nothing OrElse String.IsNullOrWhiteSpace(info.AffinityLabel) Then
+            Return message
+        End If
+
+        If message.IndexOf($"W{workerId}", StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Return message
+        End If
+
+        Return $"{message} (W{workerId} {info.AffinityLabel})"
+    End Function
+
+    Private Sub ClearWorkerAffinityMap()
+        SyncLock _workerAffinityLock
+            _workerAffinityMap.Clear()
+        End SyncLock
+    End Sub
     Private Sub RunOptionsToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles RunOptionsToolStripMenuItem.Click
         Dim updated As RunOptions = ShowRunOptionsDialog()
         If updated Is Nothing Then
@@ -3981,6 +4316,14 @@ Public Class frmMain
     End Sub
 
 End Class
+
+
+
+
+
+
+
+
 
 
 
