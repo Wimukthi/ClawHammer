@@ -1,4 +1,4 @@
-Imports LibreHardwareMonitor
+﻿Imports LibreHardwareMonitor
 Imports LibreHardwareMonitor.Hardware
 Imports System.Timers
 Imports System.Numerics
@@ -8,6 +8,8 @@ Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Drawing
 Imports System.IO
+Imports System.Collections.Concurrent
+Imports System.Text
 Imports System.Text.Json
 Imports System.Threading.Tasks
 Imports System.Linq
@@ -131,6 +133,36 @@ Public Class frmMain
     Private _cpuTopology As CpuTopologySnapshot
     Private _toolTipMain As ToolTip
     Private _sensorAccessWarningLogged As Integer = 0
+    Private _validationUiDirty As Integer = 0
+    Private _validationUiTimer As System.Windows.Forms.Timer
+    Private Const ValidationUiRefreshIntervalMs As Integer = 250
+    Private ReadOnly _pendingLogLines As New ConcurrentQueue(Of String)()
+    Private _pendingLogCount As Integer = 0
+    Private _logFlushTimer As System.Windows.Forms.Timer
+    Private _logLineCount As Integer = 0
+    Private Const LogFlushIntervalMs As Integer = 120
+    Private Const MaxVisibleLogLines As Integer = 5000
+    Private _treeListStructureDirty As Boolean = True
+    Private ReadOnly _knownSensorLabels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _treeSensorItemsByLabel As New Dictionary(Of String, ListViewItem)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _latestReadingsByLabel As New Dictionary(Of String, SensorReading)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _sensorDescriptorsByLabel As New Dictionary(Of String, SensorDescriptor)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _visibleSensorLabels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+    Private Const ProgressFlushThreshold As Integer = 16384
+    Private _adaptiveUiTimer As System.Windows.Forms.Timer
+    Private _adaptiveBasePollIntervalMs As Integer = CpuPollIntervalMs
+    Private _currentPollIntervalMs As Integer = CpuPollIntervalMs
+    Private _cpuPollSampleCount As Integer = 0
+    Private _cpuUiDroppedUpdates As Integer = 0
+    Private _cpuUsageUiDroppedUpdates As Integer = 0
+    Private _plotUiDroppedUpdates As Integer = 0
+    Private Const AdaptivePollEvalIntervalMs As Integer = 2000
+    Private Const AdaptivePollStepMs As Integer = 100
+    Private Const AdaptivePollMaxIntervalMs As Integer = 1200
+    Private Const AdaptiveHighPressureRatio As Double = 0.12
+    Private Const AdaptiveLowPressureRatio As Double = 0.02
+    Private Const AdaptiveLogQueueHigh As Integer = 400
+    Private Const AdaptiveLogQueueLow As Integer = 120
 
 
     Public Shared Sub SetDoubleBuffered(ByVal control As Control)
@@ -185,6 +217,24 @@ Public Class frmMain
             Me.IconKey = iconKey
             Me.ValueRaw = valueRaw
             Me.ValueFormat = valueFormat
+        End Sub
+    End Structure
+
+    Private Enum SensorGroupKind
+        CpuTemperature
+        CpuClock
+        CpuVoltage
+        CpuThrottle
+        Other
+    End Enum
+
+    Private Structure SensorDescriptor
+        Public ReadOnly Kind As SensorGroupKind
+        Public ReadOnly GroupName As String
+
+        Public Sub New(kind As SensorGroupKind, Optional groupName As String = "")
+            Me.Kind = kind
+            Me.GroupName = groupName
         End Sub
     End Structure
 
@@ -426,24 +476,36 @@ Public Class frmMain
     End Function
 
     Private Sub ApplyIconToItem(item As ListViewItem, iconKey As String)
+        If item Is Nothing Then
+            Return
+        End If
+
         Dim list As ImageList = lstvCoreTemps.SmallImageList
         If list Is Nothing Then
+            item.ImageKey = String.Empty
             item.ImageIndex = -1
             Return
         End If
 
-        Dim keyToUse As String = iconKey
-        If Not list.Images.ContainsKey(keyToUse) Then
+        Dim keyToUse As String = If(String.IsNullOrWhiteSpace(iconKey), IconDefault, iconKey)
+        Dim imageIndex As Integer = list.Images.IndexOfKey(keyToUse)
+        If imageIndex < 0 Then
             keyToUse = IconDefault
+            imageIndex = list.Images.IndexOfKey(keyToUse)
         End If
 
-        If list.Images.ContainsKey(keyToUse) Then
-            item.ImageKey = keyToUse
+        If imageIndex >= 0 Then
+            If item.ImageIndex <> imageIndex Then
+                item.ImageIndex = imageIndex
+            End If
+            If Not String.Equals(item.ImageKey, keyToUse, StringComparison.OrdinalIgnoreCase) Then
+                item.ImageKey = keyToUse
+            End If
         Else
+            item.ImageKey = String.Empty
             item.ImageIndex = -1
         End If
     End Sub
-
     Private Sub LoadUiLayout()
         _uiLayout = UiLayoutManager.LoadLayout()
         If _uiLayout Is Nothing Then
@@ -575,6 +637,7 @@ Public Class frmMain
         End If
 
         If Interlocked.Exchange(_cpuUiUpdatePending, 1) = 1 Then
+            Interlocked.Increment(_cpuUiDroppedUpdates)
             Return
         End If
 
@@ -612,6 +675,7 @@ Public Class frmMain
         End If
 
         If Interlocked.Exchange(_plotUpdatePending, 1) = 1 Then
+            Interlocked.Increment(_plotUiDroppedUpdates)
             Return
         End If
 
@@ -642,63 +706,163 @@ Public Class frmMain
             Return
         End If
 
-        Dim topIndex As Integer = -1
-        Dim topLabel As String = String.Empty
-        If lstvCoreTemps.TopItem IsNot Nothing Then
-            topIndex = lstvCoreTemps.TopItem.Index
-            topLabel = lstvCoreTemps.TopItem.Text
-        End If
-
         _lastSensorReadings = If(readings IsNot Nothing, New List(Of SensorReading)(readings), New List(Of SensorReading)())
         _lastAvgText = avgText
+
         For Each reading As SensorReading In _lastSensorReadings
             UpdateSensorMinMax(reading)
         Next
-        Dim items As List(Of ListViewItem) = BuildTreeListItems(_lastSensorReadings)
 
-        lstvCoreTemps.BeginUpdate()
-        Try
-            If lstvCoreTemps.Items.Count = items.Count AndAlso items.Count > 0 Then
-                UpdateTreeListItemsInPlace(items)
-            Else
+        Dim structureChanged As Boolean = _treeListStructureDirty OrElse HaveSensorLabelSetChanged(_lastSensorReadings) OrElse lstvCoreTemps.Items.Count = 0
+        If structureChanged Then
+            Dim topIndex As Integer = -1
+            Dim topLabel As String = String.Empty
+            If lstvCoreTemps.TopItem IsNot Nothing Then
+                topIndex = lstvCoreTemps.TopItem.Index
+                topLabel = lstvCoreTemps.TopItem.Text
+            End If
+
+            Dim items As List(Of ListViewItem) = BuildTreeListItems(_lastSensorReadings)
+            lstvCoreTemps.BeginUpdate()
+            Try
                 lstvCoreTemps.Items.Clear()
                 If items.Count > 0 Then
                     lstvCoreTemps.Items.AddRange(items.ToArray())
                 End If
                 RestoreTreeListScroll(topIndex, topLabel)
-            End If
-        Finally
-            lstvCoreTemps.EndUpdate()
-        End Try
+                RebuildTreeSensorRowMap()
+            Finally
+                lstvCoreTemps.EndUpdate()
+            End Try
+
+            _treeListStructureDirty = False
+        Else
+            UpdateVisibleTreeListItems(_lastSensorReadings)
+        End If
 
         cputemp.Text = avgText
     End Sub
 
-    Private Sub UpdateTreeListItemsInPlace(items As List(Of ListViewItem))
-        If items Is Nothing OrElse items.Count = 0 Then
+    Private Function HaveSensorLabelSetChanged(readings As List(Of SensorReading)) As Boolean
+        Dim latest As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If readings IsNot Nothing Then
+            For Each reading As SensorReading In readings
+                If Not String.IsNullOrWhiteSpace(reading.Label) Then
+                    latest.Add(reading.Label)
+                End If
+            Next
+        End If
+
+        Dim changed As Boolean = latest.Count <> _knownSensorLabels.Count
+        If Not changed Then
+            For Each label As String In latest
+                If Not _knownSensorLabels.Contains(label) Then
+                    changed = True
+                    Exit For
+                End If
+            Next
+        End If
+
+        If changed Then
+            _knownSensorLabels.Clear()
+            For Each label As String In latest
+                _knownSensorLabels.Add(label)
+            Next
+            PruneSensorDescriptorCache(latest)
+        End If
+
+        Return changed
+    End Function
+
+    Private Sub PruneSensorDescriptorCache(latest As HashSet(Of String))
+        If latest Is Nothing Then
             Return
         End If
 
-        For i As Integer = 0 To items.Count - 1
-            Dim source As ListViewItem = items(i)
-            Dim target As ListViewItem = lstvCoreTemps.Items(i)
-            target.Text = source.Text
-            EnsureListViewSubItems(target, 4)
-            EnsureListViewSubItems(source, 4)
-            target.SubItems(1).Text = source.SubItems(1).Text
-            target.SubItems(2).Text = source.SubItems(2).Text
-            target.SubItems(3).Text = source.SubItems(3).Text
-            Dim sourceKey As String = source.ImageKey
-            If Not String.IsNullOrWhiteSpace(sourceKey) Then
-                target.ImageKey = sourceKey
-            ElseIf source.ImageIndex >= 0 Then
-                target.ImageIndex = source.ImageIndex
-            Else
-                target.ImageIndex = -1
-                target.ImageKey = String.Empty
-            End If
-            target.Tag = source.Tag
+        Dim staleKeys As List(Of String) = _sensorDescriptorsByLabel.Keys.
+            Where(Function(key) Not latest.Contains(key)).
+            ToList()
+        For Each key As String In staleKeys
+            _sensorDescriptorsByLabel.Remove(key)
         Next
+
+        _visibleSensorLabels.RemoveWhere(Function(label) Not latest.Contains(label))
+    End Sub
+    Private Sub RebuildTreeSensorRowMap()
+        _treeSensorItemsByLabel.Clear()
+        If lstvCoreTemps Is Nothing Then
+            Return
+        End If
+
+        For Each item As ListViewItem In lstvCoreTemps.Items
+            Dim info As UiThemeManager.TreeListItemInfo = TryCast(item.Tag, UiThemeManager.TreeListItemInfo)
+            If info Is Nothing OrElse info.IsGroup Then
+                Continue For
+            End If
+            If String.IsNullOrWhiteSpace(info.Key) Then
+                Continue For
+            End If
+            _treeSensorItemsByLabel(info.Key) = item
+        Next
+    End Sub
+
+    Private Sub UpdateVisibleTreeListItems(readings As List(Of SensorReading))
+        If _treeSensorItemsByLabel.Count = 0 Then
+            Return
+        End If
+
+        _latestReadingsByLabel.Clear()
+        _visibleSensorLabels.Clear()
+
+        If readings IsNot Nothing Then
+            For Each reading As SensorReading In readings
+                If String.IsNullOrWhiteSpace(reading.Label) Then
+                    Continue For
+                End If
+
+                _latestReadingsByLabel(reading.Label) = reading
+            Next
+        End If
+
+        lstvCoreTemps.BeginUpdate()
+        Try
+            For Each entry In _treeSensorItemsByLabel
+                Dim item As ListViewItem = entry.Value
+                EnsureListViewSubItems(item, 4)
+
+                Dim reading As SensorReading = Nothing
+                If _latestReadingsByLabel.TryGetValue(entry.Key, reading) Then
+                    _visibleSensorLabels.Add(entry.Key)
+
+                    SetListViewSubItemText(item, 1, reading.ValueText)
+
+                    Dim minText As String = String.Empty
+                    Dim maxText As String = String.Empty
+                    GetSensorMinMaxText(reading, minText, maxText)
+                    SetListViewSubItemText(item, 2, minText)
+                    SetListViewSubItemText(item, 3, maxText)
+                    ApplyIconToItem(item, reading.IconKey)
+                Else
+                    SetListViewSubItemText(item, 1, "N/A")
+                    SetListViewSubItemText(item, 2, String.Empty)
+                    SetListViewSubItemText(item, 3, String.Empty)
+                End If
+            Next
+        Finally
+            lstvCoreTemps.EndUpdate()
+        End Try
+    End Sub
+
+    Private Shared Sub SetListViewSubItemText(item As ListViewItem, subItemIndex As Integer, value As String)
+        If item Is Nothing Then
+            Return
+        End If
+
+        EnsureListViewSubItems(item, subItemIndex + 1)
+        Dim current As String = item.SubItems(subItemIndex).Text
+        If Not String.Equals(current, value, StringComparison.Ordinal) Then
+            item.SubItems(subItemIndex).Text = value
+        End If
     End Sub
 
     Private Shared Sub EnsureListViewSubItems(item As ListViewItem, count As Integer)
@@ -717,6 +881,7 @@ Public Class frmMain
         End If
 
         lstvCoreTemps.FullRowSelect = True
+        _treeListStructureDirty = True
         AddHandler lstvCoreTemps.MouseDown, AddressOf TreeList_MouseDown
     End Sub
 
@@ -759,6 +924,7 @@ Public Class frmMain
             _treeListExpanded(key) = False
         End If
 
+        _treeListStructureDirty = True
         If _lastSensorReadings IsNot Nothing Then
             UpdateCoreTempUi(_lastSensorReadings, _lastAvgText)
         End If
@@ -805,32 +971,30 @@ Public Class frmMain
         Dim otherGroups As New Dictionary(Of String, List(Of SensorReading))(StringComparer.OrdinalIgnoreCase)
 
         For Each reading As SensorReading In readings
-            Dim label As String = If(reading.Label, String.Empty)
-            Dim labelLower As String = label.ToLowerInvariant()
+            Dim descriptor As SensorDescriptor = GetOrCreateSensorDescriptor(reading.Label)
 
-            If labelLower.StartsWith("cpu throttle") Then
-                cpuThrottle.Add(reading)
-            ElseIf labelLower.StartsWith("cpu clock") Then
-                cpuClocks.Add(reading)
-            ElseIf labelLower.StartsWith("cpu voltage") Then
-                cpuVoltages.Add(reading)
-            Else
-                Dim prefix As String = ExtractHardwarePrefix(label)
-                If prefix.Equals("Cpu", StringComparison.OrdinalIgnoreCase) Then
+            Select Case descriptor.Kind
+                Case SensorGroupKind.CpuThrottle
+                    cpuThrottle.Add(reading)
+                Case SensorGroupKind.CpuClock
+                    cpuClocks.Add(reading)
+                Case SensorGroupKind.CpuVoltage
+                    cpuVoltages.Add(reading)
+                Case SensorGroupKind.CpuTemperature
                     cpuTemps.Add(reading)
-                Else
-                    Dim groupName As String = NormalizeHardwareGroupName(prefix)
+                Case Else
+                    Dim groupName As String = descriptor.GroupName
                     If String.IsNullOrWhiteSpace(groupName) Then
                         groupName = "Other"
                     End If
+
                     Dim list As List(Of SensorReading) = Nothing
                     If Not otherGroups.TryGetValue(groupName, list) Then
                         list = New List(Of SensorReading)()
                         otherGroups(groupName) = list
                     End If
                     list.Add(reading)
-                End If
-            End If
+            End Select
         Next
 
         Dim compare As Comparison(Of SensorReading) = Function(a, b) StringComparer.OrdinalIgnoreCase.Compare(a.Label, b.Label)
@@ -865,16 +1029,57 @@ Public Class frmMain
                     Dim minText As String = String.Empty
                     Dim maxText As String = String.Empty
                     GetSensorMinMaxText(reading, minText, maxText)
-                    items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, String.Empty, 1, False, False))
+                    items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, reading.Label, 1, False, False))
                 Next
             End If
         Next
 
         If items.Count = 0 Then
-            items.Add(CreateTreeListItem("Sensors", "N/A", String.Empty, String.Empty, IconDefault, String.Empty, 0, False, False))
+            items.Add(CreateTreeListItem("Sensors", "N/A", String.Empty, String.Empty, IconDefault, "Sensors", 0, False, False))
         End If
 
         Return items
+    End Function
+
+    Private Function GetOrCreateSensorDescriptor(label As String) As SensorDescriptor
+        If String.IsNullOrWhiteSpace(label) Then
+            Return New SensorDescriptor(SensorGroupKind.Other, "Other")
+        End If
+
+        Dim descriptor As SensorDescriptor = Nothing
+        If _sensorDescriptorsByLabel.TryGetValue(label, descriptor) Then
+            Return descriptor
+        End If
+
+        descriptor = BuildSensorDescriptor(label)
+        _sensorDescriptorsByLabel(label) = descriptor
+        Return descriptor
+    End Function
+
+    Private Function BuildSensorDescriptor(label As String) As SensorDescriptor
+        Dim labelLower As String = label.ToLowerInvariant()
+
+        If labelLower.StartsWith("cpu throttle", StringComparison.Ordinal) Then
+            Return New SensorDescriptor(SensorGroupKind.CpuThrottle)
+        End If
+        If labelLower.StartsWith("cpu clock", StringComparison.Ordinal) Then
+            Return New SensorDescriptor(SensorGroupKind.CpuClock)
+        End If
+        If labelLower.StartsWith("cpu voltage", StringComparison.Ordinal) Then
+            Return New SensorDescriptor(SensorGroupKind.CpuVoltage)
+        End If
+
+        Dim prefix As String = ExtractHardwarePrefix(label)
+        If prefix.Equals("Cpu", StringComparison.OrdinalIgnoreCase) Then
+            Return New SensorDescriptor(SensorGroupKind.CpuTemperature)
+        End If
+
+        Dim groupName As String = NormalizeHardwareGroupName(prefix)
+        If String.IsNullOrWhiteSpace(groupName) Then
+            groupName = "Other"
+        End If
+
+        Return New SensorDescriptor(SensorGroupKind.Other, groupName)
     End Function
 
     Private Sub AddTreeListSubgroup(items As List(Of ListViewItem), label As String, iconKey As String, key As String, readings As List(Of SensorReading), level As Integer)
@@ -893,7 +1098,7 @@ Public Class frmMain
             Dim minText As String = String.Empty
             Dim maxText As String = String.Empty
             GetSensorMinMaxText(reading, minText, maxText)
-            items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, String.Empty, level + 1, False, False))
+            items.Add(CreateTreeListItem(reading.Label, reading.ValueText, minText, maxText, reading.IconKey, reading.Label, level + 1, False, False))
         Next
     End Sub
 
@@ -991,6 +1196,7 @@ Public Class frmMain
         End If
 
         If Interlocked.Exchange(_cpuUsageUiUpdatePending, 1) = 1 Then
+            Interlocked.Increment(_cpuUsageUiDroppedUpdates)
             Return
         End If
 
@@ -1022,6 +1228,8 @@ Public Class frmMain
         End If
 
         Try
+            Interlocked.Increment(_cpuPollSampleCount)
+
             If _computer Is Nothing Then
                 InitializeHardwareMonitor()
             End If
@@ -1127,6 +1335,7 @@ Public Class frmMain
         End Try
     End Sub
     Private Sub frmMain_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+        FlushPendingLogs(True)
         If chkSaveLog.Checked Then
             logs.WriteLog(rhtxtlog.Text)
         End If
@@ -1136,6 +1345,27 @@ Public Class frmMain
             _throughputTimer.Stop()
             _throughputTimer.Dispose()
             _throughputTimer = Nothing
+        End If
+
+        If _validationUiTimer IsNot Nothing Then
+            RemoveHandler _validationUiTimer.Tick, AddressOf ValidationUiTimer_Tick
+            _validationUiTimer.Stop()
+            _validationUiTimer.Dispose()
+            _validationUiTimer = Nothing
+        End If
+
+        If _adaptiveUiTimer IsNot Nothing Then
+            RemoveHandler _adaptiveUiTimer.Tick, AddressOf AdaptiveUiTimer_Tick
+            _adaptiveUiTimer.Stop()
+            _adaptiveUiTimer.Dispose()
+            _adaptiveUiTimer = Nothing
+        End If
+
+        If _logFlushTimer IsNot Nothing Then
+            RemoveHandler _logFlushTimer.Tick, AddressOf LogFlushTimer_Tick
+            _logFlushTimer.Stop()
+            _logFlushTimer.Dispose()
+            _logFlushTimer = Nothing
         End If
 
         StopTimedRun()
@@ -1195,6 +1425,9 @@ Public Class frmMain
         Dim initForm As frmInit = Nothing
         My.Application.SaveMySettingsOnExit = False
         LoadUiLayout()
+        InitializeLogPipeline()
+        InitializeValidationUiTimer()
+        InitializeAdaptiveUiTimer()
         Try
             initForm = New frmInit()
             initForm.Show(Me)
@@ -1275,9 +1508,10 @@ Public Class frmMain
             coreCount = Await Task.Run(Function() QueryPhysicalCoreCount())
 
             Me.Text = "ClawHammer " & GetAppVersionDisplay() & " - [Idle]"
-            NumThreads.Maximum = Environment.ProcessorCount
-            NumThreads.Value = Environment.ProcessorCount
-            CmbThreadPriority.Text = "Normal"
+            Dim logicalProcessors As Integer = Environment.ProcessorCount
+            NumThreads.Maximum = logicalProcessors
+            NumThreads.Value = Math.Max(1, logicalProcessors - 1)
+            CmbThreadPriority.Text = "Below Normal"
             lblProcessorCount.Text = Environment.ProcessorCount.ToString + " Hardware Threads"
             lblcores.Text = coreCount & " Physical Cores"
 
@@ -1358,13 +1592,172 @@ Public Class frmMain
     End Sub
 
     ' Thread-safe log append.
-    Private Sub LogMessage(message As String)
-        Dim timestampedMessage As String = $"[{Date.Now:yyyy-MM-dd HH:mm:ss}] {message}{vbCrLf}"
-        If rhtxtlog.InvokeRequired Then
-            rhtxtlog.BeginInvoke(Sub() rhtxtlog.AppendText(timestampedMessage))
-        Else
-            rhtxtlog.AppendText(timestampedMessage)
+    Private Sub InitializeLogPipeline()
+        If _logFlushTimer IsNot Nothing Then
+            Return
         End If
+
+        _logFlushTimer = New System.Windows.Forms.Timer() With {
+            .Interval = LogFlushIntervalMs
+        }
+        AddHandler _logFlushTimer.Tick, AddressOf LogFlushTimer_Tick
+        _logFlushTimer.Start()
+    End Sub
+
+    Private Sub LogFlushTimer_Tick(sender As Object, e As EventArgs)
+        FlushPendingLogs(False)
+    End Sub
+
+    Private Sub FlushPendingLogs(Optional drainAll As Boolean = False)
+        If rhtxtlog Is Nothing OrElse rhtxtlog.IsDisposed Then
+            Return
+        End If
+
+        If rhtxtlog.InvokeRequired Then
+            rhtxtlog.BeginInvoke(Sub() FlushPendingLogs(drainAll))
+            Return
+        End If
+
+        Dim sb As New StringBuilder()
+        Dim line As String = Nothing
+        Dim appended As Integer = 0
+        Dim maxBatch As Integer = If(drainAll, Integer.MaxValue, 256)
+
+        While appended < maxBatch AndAlso _pendingLogLines.TryDequeue(line)
+            sb.AppendLine(line)
+            appended += 1
+        End While
+
+        If appended = 0 Then
+            Return
+        End If
+
+        Interlocked.Add(_pendingLogCount, -appended)
+        rhtxtlog.AppendText(sb.ToString())
+        _logLineCount += appended
+        TrimVisibleLogLines()
+
+        If drainAll AndAlso Not _pendingLogLines.IsEmpty Then
+            FlushPendingLogs(True)
+        End If
+    End Sub
+
+    Private Sub TrimVisibleLogLines()
+        Dim overBy As Integer = _logLineCount - MaxVisibleLogLines
+        If overBy <= 0 Then
+            Return
+        End If
+
+        Dim cutIndex As Integer = rhtxtlog.GetFirstCharIndexFromLine(overBy)
+        If cutIndex > 0 Then
+            rhtxtlog.[Select](0, cutIndex)
+            rhtxtlog.SelectedText = String.Empty
+            _logLineCount -= overBy
+            Return
+        End If
+
+        Dim lines As String() = rhtxtlog.Lines
+        If lines Is Nothing OrElse lines.Length = 0 Then
+            _logLineCount = 0
+            Return
+        End If
+
+        If lines.Length > MaxVisibleLogLines Then
+            rhtxtlog.Lines = lines.Skip(lines.Length - MaxVisibleLogLines).ToArray()
+            _logLineCount = MaxVisibleLogLines
+        Else
+            _logLineCount = lines.Length
+        End If
+    End Sub
+
+    Private Sub LogMessage(message As String)
+        If String.IsNullOrWhiteSpace(message) Then
+            Return
+        End If
+
+        _pendingLogLines.Enqueue($"[{Date.Now:yyyy-MM-dd HH:mm:ss}] {message}")
+        Interlocked.Increment(_pendingLogCount)
+        If _logFlushTimer Is Nothing Then
+            InitializeLogPipeline()
+        End If
+    End Sub
+
+    Private Sub InitializeValidationUiTimer()
+        If _validationUiTimer IsNot Nothing Then
+            Return
+        End If
+
+        _validationUiTimer = New System.Windows.Forms.Timer() With {
+            .Interval = ValidationUiRefreshIntervalMs
+        }
+        AddHandler _validationUiTimer.Tick, AddressOf ValidationUiTimer_Tick
+        _validationUiTimer.Start()
+    End Sub
+
+    Private Sub InitializeAdaptiveUiTimer()
+        If _adaptiveUiTimer IsNot Nothing Then
+            Return
+        End If
+
+        _adaptiveUiTimer = New System.Windows.Forms.Timer() With {
+            .Interval = AdaptivePollEvalIntervalMs
+        }
+        AddHandler _adaptiveUiTimer.Tick, AddressOf AdaptiveUiTimer_Tick
+        _adaptiveUiTimer.Start()
+    End Sub
+
+    Private Sub AdaptiveUiTimer_Tick(sender As Object, e As EventArgs)
+        Dim samples As Integer = Interlocked.Exchange(_cpuPollSampleCount, 0)
+        Dim droppedCpu As Integer = Interlocked.Exchange(_cpuUiDroppedUpdates, 0)
+        Dim droppedUsage As Integer = Interlocked.Exchange(_cpuUsageUiDroppedUpdates, 0)
+        Dim droppedPlot As Integer = Interlocked.Exchange(_plotUiDroppedUpdates, 0)
+
+        Dim totalDropped As Integer = droppedCpu + droppedUsage + droppedPlot
+        Dim potentialUpdates As Integer = Math.Max(1, samples * 3)
+        Dim pressureRatio As Double = totalDropped / CDbl(potentialUpdates)
+        Dim logDepth As Integer = Math.Max(0, Interlocked.CompareExchange(_pendingLogCount, 0, 0))
+
+        Dim nextInterval As Integer = _currentPollIntervalMs
+        If pressureRatio >= AdaptiveHighPressureRatio OrElse logDepth >= AdaptiveLogQueueHigh Then
+            nextInterval = Math.Min(AdaptivePollMaxIntervalMs, _currentPollIntervalMs + AdaptivePollStepMs)
+        ElseIf pressureRatio <= AdaptiveLowPressureRatio AndAlso logDepth <= AdaptiveLogQueueLow Then
+            nextInterval = Math.Max(_adaptiveBasePollIntervalMs, _currentPollIntervalMs - AdaptivePollStepMs)
+        End If
+
+        If nextInterval <> _currentPollIntervalMs Then
+            _currentPollIntervalMs = nextInterval
+            ApplyCurrentCpuPollingInterval()
+        End If
+    End Sub
+
+    Private Sub ApplyCurrentCpuPollingInterval()
+        Dim interval As Integer = Math.Max(_adaptiveBasePollIntervalMs, Math.Min(AdaptivePollMaxIntervalMs, _currentPollIntervalMs))
+        _currentPollIntervalMs = interval
+
+        If _cpuDataTimer IsNot Nothing Then
+            _cpuDataTimer.Interval = interval
+        End If
+        If _cpuUsageTimer IsNot Nothing Then
+            _cpuUsageTimer.Interval = interval
+        End If
+    End Sub
+
+    Private Sub ResetAdaptiveUiPressure()
+        Interlocked.Exchange(_cpuPollSampleCount, 0)
+        Interlocked.Exchange(_cpuUiDroppedUpdates, 0)
+        Interlocked.Exchange(_cpuUsageUiDroppedUpdates, 0)
+        Interlocked.Exchange(_plotUiDroppedUpdates, 0)
+    End Sub
+    Private Sub MarkValidationUiDirty()
+        Interlocked.Exchange(_validationUiDirty, 1)
+    End Sub
+
+    Private Sub ValidationUiTimer_Tick(sender As Object, e As EventArgs)
+        If Interlocked.Exchange(_validationUiDirty, 0) = 0 Then
+            Return
+        End If
+
+        UpdateValidationDisplay()
     End Sub
 
     Private Sub HandleValidationStatusMessage(rawMessage As String)
@@ -1379,7 +1772,6 @@ Public Class frmMain
                 Dim kernel As String = parts(2)
                 Dim detail As String = parts(3)
                 Dim affinityLabel As String = GetWorkerAffinityLabel(workerId)
-                Dim snapshot As List(Of ValidationStatusSnapshot) = Nothing
 
                 SyncLock _validationStatusLock
                     _validationStatusByWorker(workerId) = New ValidationStatusSnapshot With {
@@ -1389,21 +1781,9 @@ Public Class frmMain
                         .Detail = detail,
                         .UpdatedUtc = DateTime.UtcNow
                     }
-
-                    snapshot = New List(Of ValidationStatusSnapshot)(_validationStatusByWorker.Count)
-                    For Each entry As ValidationStatusSnapshot In _validationStatusByWorker.Values
-                        snapshot.Add(New ValidationStatusSnapshot With {
-                            .WorkerId = entry.WorkerId,
-                            .Kernel = entry.Kernel,
-                            .AffinityLabel = entry.AffinityLabel,
-                            .Detail = entry.Detail,
-                            .UpdatedUtc = entry.UpdatedUtc
-                        })
-                    Next
                 End SyncLock
 
-                snapshot.Sort(Function(a, b) a.WorkerId.CompareTo(b.WorkerId))
-                UpdateValidationDisplay(snapshot)
+                MarkValidationUiDirty()
                 Return
             End If
         End If
@@ -1417,6 +1797,7 @@ Public Class frmMain
         End SyncLock
 
         _validationSummarySuffix = String.Empty
+        Interlocked.Exchange(_validationUiDirty, 0)
         UpdateValidationDisplay(New List(Of ValidationStatusSnapshot)())
     End Sub
 
@@ -2483,13 +2864,10 @@ Public Class frmMain
     End Function
 
     Private Sub ApplyUiSnappyMode()
-        Dim interval As Integer = If(_runOptions.UiSnappyMode, UiSnappyCpuPollIntervalMs, CpuPollIntervalMs)
-        If _cpuDataTimer IsNot Nothing Then
-            _cpuDataTimer.Interval = interval
-        End If
-        If _cpuUsageTimer IsNot Nothing Then
-            _cpuUsageTimer.Interval = interval
-        End If
+        _adaptiveBasePollIntervalMs = If(_runOptions.UiSnappyMode, UiSnappyCpuPollIntervalMs, CpuPollIntervalMs)
+        _currentPollIntervalMs = _adaptiveBasePollIntervalMs
+        ResetAdaptiveUiPressure()
+        ApplyCurrentCpuPollingInterval()
     End Sub
 
     Private Function GetEffectiveThreadCount() As Integer
@@ -2510,6 +2888,7 @@ Public Class frmMain
         SetTitleBarText("[Running]")
 
         NormalizeRunOptions(_runOptions)
+        ApplyUiSnappyMode()
 
         ' Initialize throughput tracking.
         _operationsCompleted = 0
@@ -2589,7 +2968,23 @@ Public Class frmMain
         Dim baseSeed As ULong = BitConverter.ToUInt64(BitConverter.GetBytes(Environment.TickCount64), 0) Xor &H9E3779B97F4A7C15UL
 
         For i = 0 To threadCount - 1
-            Dim reportProgressAction As Action(Of Integer) = Sub(ops) Interlocked.Add(_operationsCompleted, ops)
+            Dim pendingOps As Integer = 0
+            Dim reportProgressAction As Action(Of Integer) = Sub(ops)
+                                                                If ops <= 0 Then
+                                                                    Return
+                                                                End If
+                                                                pendingOps += ops
+                                                                If pendingOps >= ProgressFlushThreshold Then
+                                                                    Interlocked.Add(_operationsCompleted, pendingOps)
+                                                                    pendingOps = 0
+                                                                End If
+                                                            End Sub
+            Dim flushProgressAction As Action = Sub()
+                                                    If pendingOps > 0 Then
+                                                        Interlocked.Add(_operationsCompleted, pendingOps)
+                                                        pendingOps = 0
+                                                    End If
+                                                End Sub
 
             Dim workerId As Integer = i
             Dim coreIndex As Integer? = Nothing
@@ -2606,7 +3001,7 @@ Public Class frmMain
             Dim workerReportError As Action(Of String) = Sub(message)
                                                              Dim decorated As String = DecorateWorkerMessage(workerId, message)
                                                              LogMessage(decorated)
-                                                             UpdateValidationDisplay()
+                                                             MarkValidationUiDirty()
                                                              TriggerAutoStop(decorated)
                                                          End Sub
 
@@ -2616,11 +3011,11 @@ Public Class frmMain
                                                                    LogMessage($"Affinity set failed for core {coreIndex.Value}.")
                                                                End If
                                                            End If
+
                                                            If worker IsNot Nothing Then
                                                                Dim logicalId As Integer = ThreadAffinity.GetCurrentLogicalProcessor()
                                                                Dim runningLabel As String = BuildAffinityLabel(logicalId, topology)
                                                                LogMessage($"Thread Started ({kernelName}) {runningLabel} [Thread ID] : {Threading.Thread.CurrentThread.ManagedThreadId}")
-
 
                                                                Try
                                                                    worker.Run(token, reportProgressAction, validationSettings, workerReportError, reportStatus)
@@ -2634,8 +3029,11 @@ Public Class frmMain
                                                                    LogMessage(crashMessage)
                                                                    HandleValidationStatusMessage($"STATUS|{workerId}|{kernelName}|Crashed: {detail}")
                                                                    TriggerAutoStop("Stopping test: worker crash detected.")
+                                                               Finally
+                                                                   flushProgressAction()
                                                                End Try
-
+                                                           Else
+                                                               flushProgressAction()
                                                            End If
                                                        End Sub
 
@@ -2843,7 +3241,7 @@ Public Class frmMain
             _validationSettings.Reset()
         End If
         ClearValidationStatus()
-
+        MarkValidationUiDirty()
         If _runOptions.ValidationMode <> ValidationMode.Off Then
             If Me.InvokeRequired Then
                 Me.BeginInvoke(Sub() ShowValidationMonitorWindow())
@@ -2857,6 +3255,7 @@ Public Class frmMain
             _validationSettings.Mode = ValidationMode.Off
         End If
         ClearValidationStatus()
+        MarkValidationUiDirty()
     End Sub
 
     Private Sub TriggerAutoStop(reason As String)
@@ -3154,9 +3553,9 @@ Public Class frmMain
 
     Private Function BuildBuiltInProfiles() As Dictionary(Of String, ProfileData)
         Dim profiles As New Dictionary(Of String, ProfileData)(StringComparer.OrdinalIgnoreCase)
-        Dim threads As Integer = Environment.ProcessorCount
+        Dim threads As Integer = Math.Max(1, Environment.ProcessorCount - 1)
 
-        profiles(DefaultProfileName) = CreateProfile(threads, DefaultPluginIds.FloatingPoint, "Normal", False, New RunOptions(), 120)
+        profiles(DefaultProfileName) = CreateProfile(threads, DefaultPluginIds.FloatingPoint, "Below Normal", False, New RunOptions(), 120)
 
         profiles("OC Quick Thermal") = CreateProfile(threads, DefaultPluginIds.FloatingPoint, "Above Normal", False, New RunOptions() With {
             .TimedRunMinutes = 10,

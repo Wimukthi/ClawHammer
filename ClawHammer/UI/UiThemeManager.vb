@@ -1,4 +1,4 @@
-Imports System.Drawing
+﻿Imports System.Drawing
 Imports System.Runtime.CompilerServices
 Imports System.Windows.Forms
 Imports Microsoft.Win32
@@ -331,19 +331,22 @@ Public Module UiThemeManager
 
         Dim state As ListViewThemeState = Nothing
         If Not ListViewStates.TryGetValue(listView, state) Then
-            state = New ListViewThemeState(listView.GridLines)
+            state = New ListViewThemeState(listView.GridLines, palette)
             ListViewStates.Add(listView, state)
             AddHandler listView.DrawColumnHeader, AddressOf ListView_DrawColumnHeader
             AddHandler listView.DrawItem, AddressOf ListView_DrawItem
             AddHandler listView.DrawSubItem, AddressOf ListView_DrawSubItem
+            AddHandler listView.Disposed, AddressOf ListView_Disposed
+        Else
+            state.UpdatePalette(palette)
         End If
+
         listView.BackColor = palette.Surface
         listView.ForeColor = palette.Text
         listView.BorderStyle = BorderStyle.None
         listView.GridLines = False
         listView.OwnerDraw = True
         listView.HideSelection = False
-
     End Sub
 
     ' StatusStrip needs explicit theming and paint hooks for dark mode.
@@ -453,12 +456,29 @@ Public Module UiThemeManager
         Dim fontToUse As Font = If(listView IsNot Nothing, listView.Font, Control.DefaultFont)
         Dim bounds As Rectangle = e.Bounds
         e.DrawDefault = False
-        Using backBrush As New SolidBrush(palette.Panel)
+
+        Dim state As ListViewThemeState = Nothing
+        If listView IsNot Nothing AndAlso Not ListViewStates.TryGetValue(listView, state) Then
+            state = New ListViewThemeState(listView.GridLines, palette)
+            ListViewStates.Add(listView, state)
+        End If
+
+        Dim backBrush As Brush = If(state IsNot Nothing, CType(state.HeaderBrush, Brush), New SolidBrush(palette.Panel))
+        Dim borderPen As Pen = If(state IsNot Nothing, state.HeaderBorderPen, New Pen(palette.Border))
+        Dim ownsBackBrush As Boolean = state Is Nothing
+        Dim ownsBorderPen As Boolean = state Is Nothing
+
+        Try
             e.Graphics.FillRectangle(backBrush, bounds)
-        End Using
-        Using borderPen As New Pen(palette.Border)
             e.Graphics.DrawRectangle(borderPen, bounds)
-        End Using
+        Finally
+            If ownsBackBrush Then
+                backBrush.Dispose()
+            End If
+            If ownsBorderPen Then
+                borderPen.Dispose()
+            End If
+        End Try
 
         Dim textRect As New Rectangle(bounds.X + 6, bounds.Y, Math.Max(0, bounds.Width - 12), bounds.Height)
         Dim headerAlign As HorizontalAlignment = If(e.Header IsNot Nothing, e.Header.TextAlign, HorizontalAlignment.Left)
@@ -471,10 +491,10 @@ Public Module UiThemeManager
             Case Else
                 flags = flags Or TextFormatFlags.Left
         End Select
-        Dim headerTextColor As Color = GetReadableTextColor(palette.Panel, DarkPaletteValue.Text, LightPaletteValue.Text)
+
+        Dim headerTextColor As Color = If(state IsNot Nothing, state.HeaderTextColor, GetReadableTextColor(palette.Panel, DarkPaletteValue.Text, LightPaletteValue.Text))
         TextRenderer.DrawText(e.Graphics, e.Header.Text, fontToUse, textRect, headerTextColor, flags)
     End Sub
-
     Private Sub ListView_DrawItem(sender As Object, e As DrawListViewItemEventArgs)
         If e Is Nothing Then
             Return
@@ -491,7 +511,6 @@ Public Module UiThemeManager
 
         e.DrawDefault = False
     End Sub
-
     Private Sub ListView_DrawSubItem(sender As Object, e As DrawListViewSubItemEventArgs)
         Dim listView As ListView = TryCast(sender, ListView)
         If listView Is Nothing OrElse e Is Nothing OrElse e.Item Is Nothing Then
@@ -501,20 +520,19 @@ Public Module UiThemeManager
         e.DrawDefault = False
 
         Dim palette As UiThemePalette = palette
+        Dim state As ListViewThemeState = Nothing
+        If Not ListViewStates.TryGetValue(listView, state) Then
+            state = New ListViewThemeState(listView.GridLines, palette)
+            ListViewStates.Add(listView, state)
+        End If
+
         Dim fontToUse As Font = If(e.Item.Font, listView.Font)
         Dim isSelected As Boolean = e.Item.Selected
         Dim isFocused As Boolean = listView.Focused
-        Dim backColor As Color = If(isSelected, If(isFocused, palette.SelectionBack, palette.SelectionBackInactive), palette.Surface)
-        Dim foreColor As Color
-        If isSelected Then
-            foreColor = GetReadableTextColor(backColor, DarkPaletteValue.SelectionText, LightPaletteValue.SelectionText)
-        Else
-            foreColor = GetReadableTextColor(backColor, DarkPaletteValue.Text, LightPaletteValue.Text)
-        End If
+        Dim backBrush As Brush = If(isSelected, If(isFocused, CType(state.SelectionBrush, Brush), CType(state.SelectionInactiveBrush, Brush)), CType(state.SurfaceBrush, Brush))
+        Dim foreColor As Color = If(isSelected, state.SelectionTextColor, state.TextColor)
 
-        Using backBrush As New SolidBrush(backColor)
-            e.Graphics.FillRectangle(backBrush, e.Bounds)
-        End Using
+        e.Graphics.FillRectangle(backBrush, e.Bounds)
 
         Dim textRect As Rectangle = e.Bounds
         textRect.Inflate(-4, 0)
@@ -534,10 +552,10 @@ Public Module UiThemeManager
         If e.ColumnIndex = 0 Then
             Dim leftX As Integer = textRect.X + treeIndent
             If treeGlyphText IsNot Nothing Then
-                Dim glyphSize As Size = TextRenderer.MeasureText(e.Graphics, treeGlyphText, fontToUse, New Size(Integer.MaxValue, Integer.MaxValue), TextFormatFlags.NoPadding)
-                Dim glyphRect As New Rectangle(leftX, e.Bounds.Top, glyphSize.Width, e.Bounds.Height)
+                Dim glyphWidth As Integer = state.GetTreeGlyphWidth(e.Graphics, fontToUse)
+                Dim glyphRect As New Rectangle(leftX, e.Bounds.Top, glyphWidth, e.Bounds.Height)
                 TextRenderer.DrawText(e.Graphics, treeGlyphText, fontToUse, glyphRect, foreColor, TextFormatFlags.VerticalCenter Or TextFormatFlags.NoPadding)
-                leftX += glyphSize.Width + 4
+                leftX += glyphWidth + 4
             End If
 
             Dim imageList As ImageList = listView.SmallImageList
@@ -571,17 +589,22 @@ Public Module UiThemeManager
 
         TextRenderer.DrawText(e.Graphics, e.SubItem.Text, fontToUse, textRect, foreColor, flags)
 
-        Dim state As ListViewThemeState = Nothing
-        Dim showGridLines As Boolean = listView.GridLines
-        If ListViewStates.TryGetValue(listView, state) Then
-            showGridLines = state.ShowGridLines
+        If state.ShowGridLines Then
+            e.Graphics.DrawLine(state.GridPen, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom)
+            e.Graphics.DrawLine(state.GridPen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1)
+        End If
+    End Sub
+
+    Private Sub ListView_Disposed(sender As Object, e As EventArgs)
+        Dim listView As ListView = TryCast(sender, ListView)
+        If listView Is Nothing Then
+            Return
         End If
 
-        If showGridLines Then
-            Using gridPen As New Pen(palette.GridLine)
-                e.Graphics.DrawLine(gridPen, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom)
-                e.Graphics.DrawLine(gridPen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1)
-            End Using
+        Dim state As ListViewThemeState = Nothing
+        If ListViewStates.TryGetValue(listView, state) Then
+            state.Dispose()
+            ListViewStates.Remove(listView)
         End If
     End Sub
 
@@ -598,12 +621,155 @@ Public Module UiThemeManager
             Me.IsExpanded = isExpanded
         End Sub
     End Class
-
     Private NotInheritable Class ListViewThemeState
-        Public ReadOnly ShowGridLines As Boolean
+        Implements IDisposable
 
-        Public Sub New(showGridLines As Boolean)
-            Me.ShowGridLines = showGridLines
+        Private ReadOnly _showGridLines As Boolean
+        Private _surfaceBrush As SolidBrush
+        Private _selectionBrush As SolidBrush
+        Private _selectionInactiveBrush As SolidBrush
+        Private _headerBrush As SolidBrush
+        Private _gridPen As Pen
+        Private _headerBorderPen As Pen
+        Private _textColor As Color
+        Private _selectionTextColor As Color
+        Private _headerTextColor As Color
+        Private _treeGlyphWidth As Integer = -1
+        Private _treeGlyphFontHash As Integer = 0
+
+        Public Sub New(showGridLines As Boolean, palette As UiThemePalette)
+            _showGridLines = showGridLines
+            UpdatePalette(palette)
+        End Sub
+
+        Public ReadOnly Property ShowGridLines As Boolean
+            Get
+                Return _showGridLines
+            End Get
+        End Property
+
+        Public ReadOnly Property SurfaceBrush As SolidBrush
+            Get
+                Return _surfaceBrush
+            End Get
+        End Property
+
+        Public ReadOnly Property SelectionBrush As SolidBrush
+            Get
+                Return _selectionBrush
+            End Get
+        End Property
+
+        Public ReadOnly Property SelectionInactiveBrush As SolidBrush
+            Get
+                Return _selectionInactiveBrush
+            End Get
+        End Property
+
+        Public ReadOnly Property HeaderBrush As SolidBrush
+            Get
+                Return _headerBrush
+            End Get
+        End Property
+
+        Public ReadOnly Property GridPen As Pen
+            Get
+                Return _gridPen
+            End Get
+        End Property
+
+        Public ReadOnly Property HeaderBorderPen As Pen
+            Get
+                Return _headerBorderPen
+            End Get
+        End Property
+
+        Public ReadOnly Property TextColor As Color
+            Get
+                Return _textColor
+            End Get
+        End Property
+
+        Public ReadOnly Property SelectionTextColor As Color
+            Get
+                Return _selectionTextColor
+            End Get
+        End Property
+
+        Public ReadOnly Property HeaderTextColor As Color
+            Get
+                Return _headerTextColor
+            End Get
+        End Property
+
+        Public Function GetTreeGlyphWidth(graphics As Graphics, font As Font) As Integer
+            Dim fontHash As Integer = If(font IsNot Nothing, font.GetHashCode(), 0)
+            If _treeGlyphWidth <= 0 OrElse _treeGlyphFontHash <> fontHash Then
+                Dim safeFont As Font = If(font, Control.DefaultFont)
+                _treeGlyphWidth = TextRenderer.MeasureText(graphics, "[-]", safeFont, New Size(Integer.MaxValue, Integer.MaxValue), TextFormatFlags.NoPadding).Width
+                _treeGlyphFontHash = fontHash
+            End If
+            Return _treeGlyphWidth
+        End Function
+
+        Public Sub UpdatePalette(palette As UiThemePalette)
+            If _surfaceBrush IsNot Nothing Then
+                _surfaceBrush.Dispose()
+            End If
+            If _selectionBrush IsNot Nothing Then
+                _selectionBrush.Dispose()
+            End If
+            If _selectionInactiveBrush IsNot Nothing Then
+                _selectionInactiveBrush.Dispose()
+            End If
+            If _headerBrush IsNot Nothing Then
+                _headerBrush.Dispose()
+            End If
+            If _gridPen IsNot Nothing Then
+                _gridPen.Dispose()
+            End If
+            If _headerBorderPen IsNot Nothing Then
+                _headerBorderPen.Dispose()
+            End If
+
+            _surfaceBrush = New SolidBrush(palette.Surface)
+            _selectionBrush = New SolidBrush(palette.SelectionBack)
+            _selectionInactiveBrush = New SolidBrush(palette.SelectionBackInactive)
+            _headerBrush = New SolidBrush(palette.Panel)
+            _gridPen = New Pen(palette.GridLine)
+            _headerBorderPen = New Pen(palette.Border)
+            _textColor = GetReadableTextColor(palette.Surface, DarkPaletteValue.Text, LightPaletteValue.Text)
+            _selectionTextColor = GetReadableTextColor(palette.SelectionBack, DarkPaletteValue.SelectionText, LightPaletteValue.SelectionText)
+            _headerTextColor = GetReadableTextColor(palette.Panel, DarkPaletteValue.Text, LightPaletteValue.Text)
+            _treeGlyphWidth = -1
+            _treeGlyphFontHash = 0
+        End Sub
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If _surfaceBrush IsNot Nothing Then
+                _surfaceBrush.Dispose()
+                _surfaceBrush = Nothing
+            End If
+            If _selectionBrush IsNot Nothing Then
+                _selectionBrush.Dispose()
+                _selectionBrush = Nothing
+            End If
+            If _selectionInactiveBrush IsNot Nothing Then
+                _selectionInactiveBrush.Dispose()
+                _selectionInactiveBrush = Nothing
+            End If
+            If _headerBrush IsNot Nothing Then
+                _headerBrush.Dispose()
+                _headerBrush = Nothing
+            End If
+            If _gridPen IsNot Nothing Then
+                _gridPen.Dispose()
+                _gridPen = Nothing
+            End If
+            If _headerBorderPen IsNot Nothing Then
+                _headerBorderPen.Dispose()
+                _headerBorderPen = Nothing
+            End If
         End Sub
     End Class
 
