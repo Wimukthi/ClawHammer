@@ -2,9 +2,9 @@ param(
     [string]$ProjectPath = (Join-Path $PSScriptRoot "..\\ClawHammer\\ClawHammer.vbproj"),
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [bool]$SelfContained = $true,
-    [bool]$SingleFile = $true,
-    [bool]$EnableSingleFileCompression = $true,
+    [bool]$SelfContained = $false,
+    [bool]$SingleFile = $false,
+    [bool]$EnableSingleFileCompression = $false,
     [ValidateSet("lean", "full")]
     [string]$PackageLayout = "lean",
     [string]$PublishDir = "",
@@ -72,6 +72,30 @@ function Copy-DirectoryContent([string]$sourceDir, [string]$destDir) {
         }
     }
 }
+function Copy-LeanPublishContent([string]$sourceDir, [string]$destDir) {
+    if (-not (Test-Path $sourceDir)) {
+        return
+    }
+
+    if (-not (Test-Path $destDir)) {
+        New-Item -ItemType Directory -Path $destDir | Out-Null
+    }
+
+    $excludedExtensions = @(".pdb", ".xml", ".md", ".map", ".iobj", ".ipdb", ".exp", ".lib")
+    $excludedFileNames = @("createdump.exe", "clawhammer.defaultplugins.dll")
+
+    Get-ChildItem -Path $sourceDir -File | ForEach-Object {
+        $ext = [System.IO.Path]::GetExtension($_.Name).ToLowerInvariant()
+        if ($excludedExtensions -contains $ext) {
+            return
+        }
+        if ($excludedFileNames -contains $_.Name.ToLowerInvariant()) {
+            return
+        }
+
+        Copy-Item -Path $_.FullName -Destination (Join-Path $destDir $_.Name) -Force
+    }
+}
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
@@ -81,11 +105,6 @@ if ([string]::IsNullOrWhiteSpace($PublishDir)) {
 
 $packageDir = Join-Path $repoRoot "artifacts\\package\\$Runtime"
 $releaseDir = Join-Path $repoRoot "artifacts\\release"
-
-if ($PackageLayout -eq "lean" -and -not $SingleFile) {
-    Write-Host "PackageLayout=lean requires single-file publish. Falling back to full layout."
-    $PackageLayout = "full"
-}
 
 if (-not $SkipBuild) {
     if (Test-Path $PublishDir) {
@@ -99,8 +118,6 @@ if (-not $SkipBuild) {
         "-r", $Runtime,
         "--self-contained", $selfContainedArg,
         "-o", $PublishDir,
-        "/p:DebugType=None",
-        "/p:DebugSymbols=false",
         "/p:CopyOutputSymbolsToPublishDirectory=false"
     )
 
@@ -154,17 +171,8 @@ if ($PackageLayout -eq "full") {
     Copy-DirectoryContent -sourceDir $PublishDir -destDir $packageDir
 }
 else {
-    Copy-Item -Path $exePath -Destination (Join-Path $packageDir "ClawHammer.exe") -Force
+    Copy-LeanPublishContent -sourceDir $PublishDir -destDir $packageDir
 
-    $runtimeConfigPath = Join-Path $PublishDir "ClawHammer.runtimeconfig.json"
-    if (Test-Path $runtimeConfigPath) {
-        Copy-Item -Path $runtimeConfigPath -Destination (Join-Path $packageDir "ClawHammer.runtimeconfig.json") -Force
-    }
-
-    $depsPath = Join-Path $PublishDir "ClawHammer.deps.json"
-    if (Test-Path $depsPath) {
-        Copy-Item -Path $depsPath -Destination (Join-Path $packageDir "ClawHammer.deps.json") -Force
-    }
 
     $iconsSourceDir = Join-Path $PublishDir "icons"
     if (Test-Path $iconsSourceDir) {
