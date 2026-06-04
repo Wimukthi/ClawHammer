@@ -12,7 +12,7 @@ static class Program
 {
     public static int Main(string[] args)
     {
-        if (!TryParseArgs(args, out string? pluginPath, out string? pluginId, out int seconds))
+        if (!TryParseArgs(args, out string? pluginPath, out string? pluginId, out int seconds, out ValidationMode validationMode, out int intervalMs, out int batchSize))
         {
             PrintUsage();
             return 1;
@@ -26,7 +26,7 @@ static class Program
 
         try
         {
-            RunPlugin(pluginPath, pluginId, seconds);
+            RunPlugin(pluginPath, pluginId, seconds, validationMode, intervalMs, batchSize);
             return 0;
         }
         catch (Exception ex)
@@ -36,11 +36,14 @@ static class Program
         }
     }
 
-    private static bool TryParseArgs(string[] args, out string? pluginPath, out string? pluginId, out int seconds)
+    private static bool TryParseArgs(string[] args, out string? pluginPath, out string? pluginId, out int seconds, out ValidationMode validationMode, out int intervalMs, out int batchSize)
     {
         pluginPath = null;
         pluginId = null;
         seconds = 10;
+        validationMode = ValidationMode.Light;
+        intervalMs = 2000;
+        batchSize = 4096;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -68,6 +71,26 @@ static class Program
                     }
                     seconds = Math.Max(1, seconds);
                     break;
+                case "--validation":
+                    if (i + 1 >= args.Length || !Enum.TryParse(args[++i], ignoreCase: true, out validationMode))
+                    {
+                        return false;
+                    }
+                    break;
+                case "--interval-ms":
+                    if (i + 1 >= args.Length || !int.TryParse(args[++i], out intervalMs))
+                    {
+                        return false;
+                    }
+                    intervalMs = Math.Max(250, intervalMs);
+                    break;
+                case "--batch-size":
+                    if (i + 1 >= args.Length || !int.TryParse(args[++i], out batchSize))
+                    {
+                        return false;
+                    }
+                    batchSize = Math.Max(256, batchSize);
+                    break;
                 case "-h":
                 case "--help":
                     return false;
@@ -80,10 +103,10 @@ static class Program
     private static void PrintUsage()
     {
         Console.WriteLine("ClawHammer Plugin Runner");
-        Console.WriteLine("Usage: dotnet run -- --plugin <path> [--id <pluginId>] [--seconds 10]");
+        Console.WriteLine("Usage: dotnet run -- --plugin <path> [--id <pluginId>] [--seconds 10] [--validation Off|Light|Full] [--interval-ms 2000] [--batch-size 4096]");
     }
 
-    private static void RunPlugin(string pluginPath, string? pluginId, int seconds)
+    private static void RunPlugin(string pluginPath, string? pluginId, int seconds, ValidationMode validationMode, int intervalMs, int batchSize)
     {
         string fullPath = Path.GetFullPath(pluginPath);
         Assembly asm = AssemblyLoadContext.Default.LoadFromAssemblyPath(fullPath);
@@ -134,13 +157,16 @@ static class Program
         IStressWorker worker = selected.CreateWorker(0, 1UL, context);
 
         long totalOps = 0;
-        var validation = new ValidationSettings(ValidationMode.Light, intervalMs: 2000, batchSize: 4096);
+        var validation = new ValidationSettings(validationMode, intervalMs: intervalMs, batchSize: batchSize);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
 
         Action<int>? reportProgress = ops => Interlocked.Add(ref totalOps, ops);
         Action<string>? reportError = message =>
         {
-            validation.RecordError(message);
+            if (validation.ErrorCount == 0)
+            {
+                validation.RecordError(message);
+            }
             Console.WriteLine("ERROR: " + message);
             cts.Cancel();
         };
@@ -167,6 +193,11 @@ static class Program
         }
 
         workerTask.GetAwaiter().GetResult();
+        if (validation.ErrorCount > 0)
+        {
+            throw new InvalidOperationException($"Validation failed with {validation.ErrorCount} error(s). Last error: {validation.LastError}");
+        }
+
         Console.WriteLine("Done.");
     }
 }

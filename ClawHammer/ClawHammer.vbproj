@@ -45,12 +45,15 @@
     <BuildCounterFile>$(MSBuildProjectDirectory)\build-counter.txt</BuildCounterFile>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x86' ">
-    <PlatformTarget>x64</PlatformTarget>
+    <PlatformTarget>x86</PlatformTarget>
+    <OutputPath>bin\x86\Debug\</OutputPath>
     <DocumentationFile>ClawHammer.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
     <Optimize>true</Optimize>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x86' ">
+    <PlatformTarget>x86</PlatformTarget>
+    <OutputPath>bin\x86\Release\</OutputPath>
     <DefineDebug>false</DefineDebug>
     <DocumentationFile>ClawHammer.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
@@ -59,6 +62,7 @@
     <ApplicationIcon>icons\burn.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <PlatformTarget>x64</PlatformTarget>
     <OutputPath>bin\x64\Debug\</OutputPath>
     <DocumentationFile>ClawHammer.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
@@ -71,6 +75,7 @@
     <Optimize>true</Optimize>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <PlatformTarget>x64</PlatformTarget>
     <OutputPath>bin\x64\Release\</OutputPath>
     <DocumentationFile>ClawHammer.xml</DocumentationFile>
     <NoWarn>42016,41999,42017,42018,42019,42032,42036,42020,42021,42022</NoWarn>
@@ -105,6 +110,19 @@
     <MakeDir Directories="$(PluginsDir)" />
     <Copy SourceFiles="$(TargetDir)ClawHammer.DefaultPlugins.dll" DestinationFolder="$(PluginsDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)ClawHammer.DefaultPlugins.pdb" DestinationFolder="$(PluginsDir)" SkipUnchangedFiles="true" Condition="Exists('$(TargetDir)ClawHammer.DefaultPlugins.pdb')" />
+  </Target>
+  <Target Name="CopyNativeCoreToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <NativeCorePlatform Condition="'$(Platform)' == 'x86'">Win32</NativeCorePlatform>
+      <NativeCorePlatform Condition="'$(Platform)' == 'x64'">x64</NativeCorePlatform>
+      <NativeCorePlatform Condition="'$(NativeCorePlatform)' == '' And ('$(Platform)' == 'Any CPU' Or '$(Platform)' == 'AnyCPU')">x64</NativeCorePlatform>
+      <NativeCoreOutputDir>$(MSBuildProjectDirectory)\..\artifacts\native\$(Configuration)\$(NativeCorePlatform)\</NativeCoreOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <NativeCoreBinaries Include="$(NativeCoreOutputDir)ClawHammer.NativeCore.dll" Condition="Exists('$(NativeCoreOutputDir)ClawHammer.NativeCore.dll')" />
+      <NativeCoreBinaries Include="$(NativeCoreOutputDir)ClawHammer.NativeCore.pdb" Condition="Exists('$(NativeCoreOutputDir)ClawHammer.NativeCore.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeCoreBinaries)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="'@(NativeCoreBinaries)' != ''" />
   </Target>
   <ItemGroup>
     <Import Include="System.Drawing" />

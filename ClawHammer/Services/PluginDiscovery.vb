@@ -60,6 +60,9 @@ Public Module PluginDiscovery
                         .AssemblyPath = dll
                     })
                 Next
+            Catch ex As BadImageFormatException
+                ' Native support DLLs can live beside plugins; they are not managed plugin assemblies.
+                Continue For
             Catch ex As Exception
                 log?.Invoke($"Plugin scan failed: {Path.GetFileName(dll)}: {ex.Message}")
             End Try

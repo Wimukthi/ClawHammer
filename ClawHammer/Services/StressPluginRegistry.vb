@@ -61,6 +61,9 @@ Public Class StressPluginRegistry
 
                     _plugins.Add(instance)
                 Next
+            Catch ex As BadImageFormatException
+                ' Native support DLLs are loaded by P/Invoke and are not managed plugin assemblies.
+                Continue For
             Catch ex As Exception
                 log?.Invoke($"Plugin load failed: {Path.GetFileName(pluginPath)}: {ex.Message}")
             End Try

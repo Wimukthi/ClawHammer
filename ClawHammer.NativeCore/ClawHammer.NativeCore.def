@@ -1,0 +1,7 @@
+EXPORTS
+    CH_IsAvailable
+    CH_RunFloatingPoint
+    CH_RunAvx
+    CH_RunIntegerPrimes
+    CH_RunIntegerHeavy
+    CH_RunMemoryBandwidth

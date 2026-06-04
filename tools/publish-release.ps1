@@ -1,5 +1,6 @@
 param(
     [string]$ProjectPath = (Join-Path $PSScriptRoot "..\\ClawHammer\\ClawHammer.vbproj"),
+    [string]$NativeProjectPath = (Join-Path $PSScriptRoot "..\\ClawHammer.NativeCore\\ClawHammer.NativeCore.vcxproj"),
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
     [bool]$SelfContained = $false,
@@ -18,6 +19,7 @@ param(
     [switch]$Draft,
     [switch]$Prerelease,
     [switch]$SkipBuild,
+    [switch]$SkipNativeBuild,
     [switch]$SkipUpload
 )
 
@@ -72,6 +74,51 @@ function Copy-DirectoryContent([string]$sourceDir, [string]$destDir) {
         }
     }
 }
+
+function Resolve-MSBuildPath() {
+    if (-not [string]::IsNullOrWhiteSpace($env:MSBUILD_EXE_PATH) -and (Test-Path $env:MSBUILD_EXE_PATH)) {
+        return $env:MSBUILD_EXE_PATH
+    }
+
+    $command = Get-Command MSBuild.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\\Installer\\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $path = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\\**\\Bin\\amd64\\MSBuild.exe" | Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) {
+            return $path
+        }
+    }
+
+    $fallbacks = @(
+        "C:\\Program Files\\Microsoft Visual Studio\\18\\Insiders\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
+        "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe"
+    )
+
+    return $fallbacks | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+function Resolve-NativePlatform([string]$runtime) {
+    switch -Regex ($runtime) {
+        "x64$" { return "x64" }
+        "x86$" { return "Win32" }
+        default { return "" }
+    }
+}
+
+function Resolve-ManagedPlatform([string]$runtime) {
+    switch -Regex ($runtime) {
+        "x64$" { return "x64" }
+        "x86$" { return "x86" }
+        default { return "" }
+    }
+}
 function Copy-LeanPublishContent([string]$sourceDir, [string]$destDir) {
     if (-not (Test-Path $sourceDir)) {
         return
@@ -98,6 +145,9 @@ function Copy-LeanPublishContent([string]$sourceDir, [string]$destDir) {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$nativeProjectFullPath = Resolve-Path $NativeProjectPath
+$nativePlatform = Resolve-NativePlatform -runtime $Runtime
+$managedPlatform = Resolve-ManagedPlatform -runtime $Runtime
 
 if ([string]::IsNullOrWhiteSpace($PublishDir)) {
     $PublishDir = Join-Path $repoRoot "artifacts\\publish\\$Runtime"
@@ -111,6 +161,23 @@ if (-not $SkipBuild) {
         Remove-Item -Path (Join-Path $PublishDir "*") -Force -Recurse -ErrorAction SilentlyContinue
     }
 
+    if (-not $SkipNativeBuild) {
+        if ([string]::IsNullOrWhiteSpace($nativePlatform)) {
+            throw "No native platform mapping is defined for runtime '$Runtime'."
+        }
+
+        $msbuildPath = Resolve-MSBuildPath
+        if ([string]::IsNullOrWhiteSpace($msbuildPath)) {
+            throw "MSBuild.exe was not found. Install Visual Studio with C++ build tools, or set MSBUILD_EXE_PATH."
+        }
+
+        Write-Host "Building native core ($Configuration|$nativePlatform)..."
+        & $msbuildPath $nativeProjectFullPath /t:Build /p:Configuration=$Configuration /p:Platform=$nativePlatform /v:minimal
+        if ($LASTEXITCODE -ne 0) {
+            throw "Native core build failed."
+        }
+    }
+
     $selfContainedArg = if ($SelfContained) { "true" } else { "false" }
     $publishArgs = @(
         $ProjectPath,
@@ -118,6 +185,7 @@ if (-not $SkipBuild) {
         "-r", $Runtime,
         "--self-contained", $selfContainedArg,
         "-o", $PublishDir,
+        "/p:Platform=$managedPlatform",
         "/p:CopyOutputSymbolsToPublishDirectory=false"
     )
 
@@ -132,6 +200,15 @@ if (-not $SkipBuild) {
 
     Write-Host "Publishing $Runtime ($Configuration, self-contained=$selfContainedArg, single-file=$SingleFile, layout=$PackageLayout)..."
     dotnet publish @publishArgs
+}
+
+if (-not [string]::IsNullOrWhiteSpace($nativePlatform)) {
+    $nativeOutputDir = Join-Path $repoRoot "artifacts\\native\\$Configuration\\$nativePlatform"
+    $nativeDll = Join-Path $nativeOutputDir "ClawHammer.NativeCore.dll"
+    if (-not (Test-Path $nativeDll)) {
+        throw "Native core DLL not found: $nativeDll"
+    }
+    Copy-Item -Path $nativeDll -Destination (Join-Path $PublishDir "ClawHammer.NativeCore.dll") -Force
 }
 
 $exePath = Join-Path $PublishDir "ClawHammer.exe"

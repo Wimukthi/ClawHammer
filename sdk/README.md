@@ -34,4 +34,21 @@ Use `sdk\pack-plugin.ps1` to zip your build output.
 ## Tools
 - `sdk/tools/PluginRunner`: console app to load a plugin DLL and run it for a few seconds.
 
+Example:
+```powershell
+dotnet run --project sdk\tools\PluginRunner\PluginRunner.csproj -- `
+  --plugin ClawHammer\bin\x64\Debug\net10.0-windows7.0\plugins\ClawHammer.DefaultPlugins.dll `
+  --id clawhammer.floating-point `
+  --seconds 5 `
+  --validation Light
+```
+
+Useful options:
+- `--validation Off|Light|Full`: choose validation mode.
+- `--interval-ms <value>`: set the minimum validation interval.
+- `--batch-size <value>`: set the worker batch size.
+
+When testing built-in native workloads outside `ClawHammer.exe`, make sure the
+directory containing `ClawHammer.NativeCore.dll` is on the DLL search path, for
+example by prepending the app output directory to `PATH`.
 

@@ -74,19 +74,35 @@ Friend Class StressTester
 
     ' Build a per-thread worker for the selected workload type.
     Public Function CreateWorker(testType As StressTestType, workerId As Integer, seed As ULong) As IStressWorker
+        Dim nativeAvailable As Boolean = NativeCoreInterop.IsAvailable()
         Select Case testType
             Case StressTestType.IntegerPrimes
+                If nativeAvailable Then
+                    Return New NativeStressWorker(NativeCoreInterop.NativeStressKernel.IntegerPrimes, "Native Integer Primes", workerId, seed, PrimeRangeMin, PrimeRangeMax, MemoryBufferBytes)
+                End If
                 Return New PrimeWorker(PrimeRangeMin, PrimeRangeMax, workerId)
             Case StressTestType.IntegerHeavy
+                If nativeAvailable Then
+                    Return New NativeStressWorker(NativeCoreInterop.NativeStressKernel.IntegerHeavy, "Native Integer Heavy", workerId, seed, PrimeRangeMin, PrimeRangeMax, MemoryBufferBytes)
+                End If
                 Return New IntegerHeavyWorker(workerId, seed)
             Case StressTestType.MemoryBandwidth
+                If nativeAvailable Then
+                    Return New NativeStressWorker(NativeCoreInterop.NativeStressKernel.MemoryBandwidth, "Native Memory Bandwidth", workerId, seed, PrimeRangeMin, PrimeRangeMax, MemoryBufferBytes)
+                End If
                 Return New MemoryBandwidthWorker(workerId, seed, MemoryBufferBytes)
             Case StressTestType.AVX
                 If Not Vector.IsHardwareAccelerated Then
                     Return New FloatingPointWorker(workerId, seed)
                 End If
+                If nativeAvailable Then
+                    Return New NativeStressWorker(NativeCoreInterop.NativeStressKernel.Avx, "Native AVX", workerId, seed, PrimeRangeMin, PrimeRangeMax, MemoryBufferBytes)
+                End If
                 Return New AvxWorker(workerId, seed)
             Case StressTestType.FloatingPoint
+                If nativeAvailable Then
+                    Return New NativeStressWorker(NativeCoreInterop.NativeStressKernel.FloatingPoint, "Native Vector FP", workerId, seed, PrimeRangeMin, PrimeRangeMax, MemoryBufferBytes)
+                End If
                 Return New FloatingPointWorker(workerId, seed)
             Case Else
                 Return New FloatingPointWorker(workerId, seed)
@@ -263,6 +279,49 @@ Friend Class StressTester
             Next
             Return True
         End Function
+    End Class
+
+    Private Class NativeStressWorker
+        Implements IStressWorker
+
+        Private ReadOnly _kernel As NativeCoreInterop.NativeStressKernel
+        Private ReadOnly _kernelName As String
+        Private ReadOnly _workerId As Integer
+        Private ReadOnly _seed As ULong
+        Private ReadOnly _primeRangeMin As Long
+        Private ReadOnly _primeRangeMax As Long
+        Private ReadOnly _memoryBufferBytes As Integer
+
+        Public Sub New(kernel As NativeCoreInterop.NativeStressKernel, kernelName As String, workerId As Integer, seed As ULong, primeRangeMin As Long, primeRangeMax As Long, memoryBufferBytes As Integer)
+            _kernel = kernel
+            _kernelName = kernelName
+            _workerId = workerId
+            _seed = seed
+            _primeRangeMin = primeRangeMin
+            _primeRangeMax = primeRangeMax
+            _memoryBufferBytes = memoryBufferBytes
+        End Sub
+
+        Public ReadOnly Property KernelName As String Implements IStressWorker.KernelName
+            Get
+                Return _kernelName
+            End Get
+        End Property
+
+        Public Sub Run(token As CancellationToken, reportProgress As Action(Of Integer), validation As ValidationSettings, reportError As Action(Of String), reportStatus As Action(Of String)) Implements IStressWorker.Run
+            Try
+                Dim result As Integer = NativeCoreInterop.RunWorker(_kernel, _workerId, _seed, token, validation, reportProgress, reportError, reportStatus, _primeRangeMin, _primeRangeMax, _memoryBufferBytes)
+                If result < 0 AndAlso Not token.IsCancellationRequested Then
+                    reportError?.Invoke($"{KernelName} worker stopped with error code {result}.")
+                End If
+            Catch ex As DllNotFoundException
+                reportError?.Invoke("Native engine is unavailable.")
+            Catch ex As BadImageFormatException
+                reportError?.Invoke("Native engine has the wrong CPU architecture for this process.")
+            Catch ex As EntryPointNotFoundException
+                reportError?.Invoke($"{KernelName} native export was not found.")
+            End Try
+        End Sub
     End Class
 
     Private Class FloatingPointWorker
